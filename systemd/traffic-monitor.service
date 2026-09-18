@@ -1,0 +1,27 @@
+[Unit]
+Description=Send the fleet Telegram daily summary
+After=network-online.target traffic-hub.service
+Wants=network-online.target traffic-hub.service
+
+[Service]
+Type=oneshot
+User=trafficmon
+Group=trafficmon
+EnvironmentFile=/etc/traffic-monitor.env
+StateDirectory=traffic-monitor
+WorkingDirectory=/opt/traffic-monitor
+ExecStart=/usr/bin/python3 /opt/traffic-monitor/hub.py --daily
+Nice=10
+CPUQuota=15%
+TasksMax=12
+MemoryAccounting=yes
+MemoryHigh=32M
+MemoryMax=48M
+TimeoutStartSec=45
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=

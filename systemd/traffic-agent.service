@@ -1,0 +1,43 @@
+[Unit]
+Description=Traffic fleet agent (heartbeat + bandwidth jobs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trafficmon
+Group=trafficmon
+EnvironmentFile=/etc/traffic-monitor.env
+StateDirectory=traffic-monitor
+WorkingDirectory=/opt/traffic-monitor
+ExecStart=/usr/bin/python3 -u /opt/traffic-monitor/agent.py
+Restart=always
+RestartSec=5
+Nice=10
+CPUQuota=15%
+CPUWeight=20
+TasksMax=12
+MemoryAccounting=yes
+MemoryHigh=36M
+MemoryMax=56M
+MemorySwapMax=64M
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
+.env
+*.env
+!traffic-monitor.env.example
+deploy.local
+/tmp/
+.venv/
+venv/
