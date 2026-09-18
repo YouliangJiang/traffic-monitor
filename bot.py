@@ -95,7 +95,7 @@ HELP = (
 
 
 def hub_base() -> str:
-    return util.env_opt("HUB_URL", "http://127.0.0.1:8788").rstrip("/")
+    return util.env_opt("HUB_URL", "https://127.0.0.1:8788").rstrip("/")
 
 
 def fleet_token() -> str:
@@ -103,7 +103,7 @@ def fleet_token() -> str:
 
 
 def public_hub() -> str:
-    return util.env_opt("FLEET_PUBLIC_URL") or f"http://{report.host_label()}:{util.env_int('HUB_PORT', 8788)}"
+    return util.env_opt("FLEET_PUBLIC_URL") or f"https://{report.host_label()}:{util.env_int('HUB_PORT', 8788)}"
 
 
 def hub_call(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -126,7 +127,12 @@ def http_json(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        context: Optional[ssl.SSLContext] = None
+        if url.startswith("https://"):
+            import tlsutil
+
+            context = tlsutil.client_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
             body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")

@@ -3,7 +3,7 @@
 
 # SSH_TARGET=my-ssh-alias
 # HUB_HOST=my-ssh-alias
-# HUB_URL=http://127.0.0.1:8788
+# HUB_URL=https://127.0.0.1:8788
 # NODE_NAME=sg
 # TELEGRAM_BOT_TOKEN=
 # TELEGRAM_CHAT_ID=

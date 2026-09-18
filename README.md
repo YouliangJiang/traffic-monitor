@@ -35,7 +35,9 @@
 
 不要在两台机器上同时跑 bot。
 
-Hub 的 `8788` **只在有 agent 要加入时**才需要从那些机器访问到。只有一台机器时，bot 走本机回环，不必对公网放行该端口。若要放行，尽量限制来源 IP，鉴权靠 `FLEET_TOKEN`。
+Hub 对 agent 只提供 **HTTPS**（TLS 1.2+，自签证书）。防火墙放行 **入站 TCP 8788**，不是 UDP，也不是 7 层。证书和私钥在 hub 的 `/var/lib/traffic-monitor/hub.{crt,key}`；部署 agent 时由脚本从 hub 拷走 `hub.crt` 做校验。Bearer token 仍要，但不再在明文 HTTP 里传。
+
+Hub 的 `8788` **只在有 agent 要加入时**才需要对那些机器开放。只有一台机器时，bot 走本机 `https://127.0.0.1:8788`，不必对公网放行。若要放行，尽量限制来源 IP。
 
 ## 安装
 
@@ -58,7 +60,7 @@ cp deploy.local.example deploy.local
 
 ```bash
 ./deploy-remote.sh --role agent \
-  --hub http://HUB_HOST:8788 \
+  --hub https://HUB_HOST:8788 \
   --name hk --cap 2T --reset 1 \
   user@hk-host
 ```
@@ -99,9 +101,10 @@ cp deploy.local.example deploy.local
 | `MONTHLY_CAP_BYTES` | 额度字节数；`0` 表示不限额 |
 | `DAILY_REPORT_HOUR_UTC` | 日报小时 |
 | `HUB_BIND` / `HUB_PORT` | Hub 监听 |
-| `HUB_URL` | Bot 连本机 hub，一般 `http://127.0.0.1:8788` |
-| `FLEET_HUB_URL` | Agent 连 hub |
+| `HUB_URL` | Bot 连本机 hub，一般 `https://127.0.0.1:8788` |
+| `FLEET_HUB_URL` | Agent 连 hub（`https://...`） |
 | `FLEET_PUBLIC_URL` | 可选，给提示用的对外地址；不需要就留空 |
+| `HUB_CA` | 校验 hub 的证书，默认 `/var/lib/traffic-monitor/hub.crt` |
 
 ## systemd 内存上限
 

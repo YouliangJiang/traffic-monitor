@@ -6,6 +6,9 @@ __pycache__/
 *.env
 !traffic-monitor.env.example
 deploy.local
+hub.crt
+hub.key
+*.key
 /tmp/
 .venv/
 venv/

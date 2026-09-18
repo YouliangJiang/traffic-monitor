@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
 usage: install-host.sh --role hub|agent [options]
 
   --role hub|agent
-  --hub URL          agent: fleet hub, e.g. http://HUB_HOST:8788
+  --hub URL          agent: fleet hub, e.g. https://HUB_HOST:8788
   --name NAME        node name, e.g. sg
   --cap 2T|500G|unlimited
   --reset 27
@@ -56,7 +56,7 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" ]]; then
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py \
+for required in report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer; do
     if [[ ! -f "$bundle_dir/$required" ]]; then
@@ -93,6 +93,7 @@ import secrets
 import sys
 
 sys.path.insert(0, sys.argv[1])
+import tlsutil
 import util
 
 bundle = pathlib.Path(sys.argv[1])
@@ -140,13 +141,21 @@ else:
     cap_bytes = keep("MONTHLY_CAP_BYTES", "2000000000000")
 
 reset_day = os.environ.get("INSTALL_RESET") or keep("BILLING_RESET_DAY", "1")
-hub_url = os.environ.get("INSTALL_HUB_URL") or keep("FLEET_HUB_URL") or keep("HUB_URL", "http://127.0.0.1:8788")
+port = int(keep("HUB_PORT", "8788") or "8788")
+hub_url = tlsutil.as_https(
+    os.environ.get("INSTALL_HUB_URL") or keep("FLEET_HUB_URL") or keep("HUB_URL") or "",
+    "127.0.0.1",
+    port,
+)
 fleet_token = keep("FLEET_TOKEN")
 if role == "hub" and not fleet_token:
     fleet_token = secrets.token_hex(24)
 
 public_url = keep("FLEET_PUBLIC_URL")
+if public_url:
+    public_url = tlsutil.as_https(public_url, "127.0.0.1", port)
 
+local_hub = f"https://127.0.0.1:{port}"
 merged = {
     "ROLE": role,
     "NODE_NAME": node_name,
@@ -156,13 +165,14 @@ merged = {
     "DAILY_REPORT_HOUR_UTC": keep("DAILY_REPORT_HOUR_UTC", "16"),
     "HOST_LABEL": keep("HOST_LABEL"),
     "HUB_BIND": keep("HUB_BIND", "0.0.0.0"),
-    "HUB_PORT": keep("HUB_PORT", "8788"),
-    "HUB_URL": "http://127.0.0.1:8788" if role == "hub" else hub_url,
-    "FLEET_HUB_URL": hub_url if role == "agent" else keep("FLEET_HUB_URL", "http://127.0.0.1:8788"),
+    "HUB_PORT": str(port),
+    "HUB_URL": local_hub if role == "hub" else hub_url,
+    "FLEET_HUB_URL": hub_url if role == "agent" else local_hub,
     "FLEET_PUBLIC_URL": public_url,
     "FLEET_TOKEN": fleet_token,
     "TELEGRAM_BOT_TOKEN": keep("TELEGRAM_BOT_TOKEN"),
     "TELEGRAM_CHAT_ID": keep("TELEGRAM_CHAT_ID"),
+    "HUB_CA": keep("HUB_CA", "/var/lib/traffic-monitor/hub.crt"),
 }
 if role == "hub" and not merged["TELEGRAM_BOT_TOKEN"]:
     raise SystemExit("hub role needs TELEGRAM_BOT_TOKEN in /etc/traffic-monitor.env")
@@ -175,6 +185,17 @@ env_path.chmod(0o600)
 
 state_dir = pathlib.Path("/var/lib/traffic-monitor")
 state_dir.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("STATE_DIRECTORY", str(state_dir))
+if role == "hub":
+    dns_names, ip_names = tlsutil.classify_names(
+        [
+            keep("HOST_LABEL"),
+            public_url,
+            hub_url,
+            os.environ.get("INSTALL_HUB_URL") or "",
+        ]
+    )
+    tlsutil.ensure_hub_cert(dns_names, ip_names)
 bootstrap = state_dir / "bootstrap.json"
 if not bootstrap.exists():
     rx = tx = None
@@ -210,6 +231,14 @@ PY
 chown -R trafficmon:trafficmon /var/lib/traffic-monitor
 chmod 0755 /var/lib/traffic-monitor
 chmod 0644 /var/lib/traffic-monitor/bootstrap.json 2>/dev/null || true
+if [[ -f "$bundle_dir/hub.crt" ]]; then
+    install -m 0644 "$bundle_dir/hub.crt" /var/lib/traffic-monitor/hub.crt
+fi
+if [[ -f /var/lib/traffic-monitor/hub.key ]]; then
+    chmod 0600 /var/lib/traffic-monitor/hub.key
+fi
+chmod 0644 /var/lib/traffic-monitor/hub.crt 2>/dev/null || true
+chown trafficmon:trafficmon /var/lib/traffic-monitor/hub.crt /var/lib/traffic-monitor/hub.key 2>/dev/null || true
 chmod 0600 /etc/traffic-monitor.env
 chown root:root /etc/traffic-monitor.env
 python3 -m py_compile /opt/traffic-monitor/*.py
@@ -244,7 +273,7 @@ fi
 echo "role=$ROLE"
 if [[ "$ROLE" == hub ]]; then
     systemctl --no-pager --full status traffic-hub.service traffic-bot.service
-    echo "Open inbound TCP 8788 on this host so other agents can join."
+    echo "Open inbound TCP 8788 (TLS) on this host so other agents can join."
 else
     systemctl --no-pager --full status traffic-agent.service
 fi

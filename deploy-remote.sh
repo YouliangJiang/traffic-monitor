@@ -5,7 +5,7 @@ usage() {
     cat >&2 <<'EOF'
 usage:
   ./deploy-remote.sh [ssh-target]
-  ./deploy-remote.sh --role agent --hub http://HUB:8788 --name hk --cap 2T [ssh-target]
+  ./deploy-remote.sh --role agent --hub https://HUB:8788 --name hk --cap 2T [ssh-target]
 
 Machine-specific values belong in deploy.local (gitignored) or /etc/traffic-monitor.env
 on the target. Copy deploy.local.example to deploy.local.
@@ -115,7 +115,18 @@ fi
 
 COPYFILE_DISABLE=1 tar --no-xattrs -C "$bundle_dir" \
     --exclude='.git' --exclude='__pycache__' --exclude='deploy.local' \
+    --exclude='hub.crt' --exclude='hub.key' \
     -cf - . | ssh -o BatchMode=yes "$target" "tar -xf - -C '$remote_stage'"
+
+if [[ "$ROLE" == agent ]]; then
+    if [[ -z "$hub_host" ]]; then
+        echo "agent TLS needs HUB_HOST in deploy.local to copy hub.crt" >&2
+        exit 3
+    fi
+    ssh -o BatchMode=yes "$hub_host" "sudo -n cat /var/lib/traffic-monitor/hub.crt" \
+        | ssh -o BatchMode=yes "$target" "cat > '$remote_stage/hub.crt'"
+    ssh -o BatchMode=yes "$target" "test -s '$remote_stage/hub.crt'"
+fi
 
 py_sudo="python3"
 install_cmd="bash '$remote_stage/install-host.sh'"

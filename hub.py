@@ -499,15 +499,18 @@ def serve() -> None:
     threading.Thread(target=HUB.local_loop, name="local-collect", daemon=True).start()
     bind = util.env_opt("HUB_BIND", "0.0.0.0")
     port = util.env_int("HUB_PORT", 8788)
+    import tlsutil
+
     server = HubServer((bind, port), HubHandler)
-    print(f"traffic-hub listening {bind}:{port} local={HUB.local_name}", flush=True)
+    server.socket = tlsutil.server_context().wrap_socket(server.socket, server_side=True)
+    print(f"traffic-hub listening https://{bind}:{port} local={HUB.local_name}", flush=True)
     server.serve_forever()
 
 
 def daily_report() -> None:
     token = util.env("TELEGRAM_BOT_TOKEN")
     chat_id = util.env("TELEGRAM_CHAT_ID")
-    fleet = util.env_opt("HUB_URL", "http://127.0.0.1:8788").rstrip("/")
+    fleet = util.env_opt("HUB_URL", "https://127.0.0.1:8788").rstrip("/")
     rows = util.http_json("GET", f"{fleet}/v1/nodes", util.env("FLEET_TOKEN"), timeout=15)
     import formatters
 
