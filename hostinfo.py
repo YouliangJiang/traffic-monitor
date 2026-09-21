@@ -13,6 +13,8 @@ from pathlib import Path
 
 from report import fmt_bytes, h, host_label, progress_bar, tcp_443_open, utcnow
 
+import i18n
+
 CST = timezone(timedelta(hours=8))
 
 
@@ -57,10 +59,10 @@ def fmt_duration(seconds: float) -> str:
     hours, s = divmod(s, 3600)
     minutes, s = divmod(s, 60)
     if days:
-        return f"{days}天{hours}小时{minutes}分"
+        return i18n.t("dur.dh", days=days, hours=hours, minutes=minutes)
     if hours:
-        return f"{hours}小时{minutes}分"
-    return f"{minutes}分{s}秒"
+        return i18n.t("dur.hm", hours=hours, minutes=minutes)
+    return i18n.t("dur.ms", minutes=minutes, seconds=s)
 
 
 def fmt_mib(n: int) -> str:
@@ -195,7 +197,7 @@ def _cf_upload(seconds: float) -> tuple[int, float]:
                 conn.send(hdr + chunk + b"\r\n")
             except (TimeoutError, socket.timeout, OSError) as exc:
                 if sent < 64_000:
-                    raise RuntimeError(f"上传发送超时：{exc}") from exc
+                    raise RuntimeError(i18n.t("upload.send_timeout", err=exc)) from exc
                 break
             sent += len(chunk)
         send_dt = max(0.001, time.monotonic() - t0)
@@ -213,9 +215,9 @@ def _cf_upload(seconds: float) -> tuple[int, float]:
         except OSError:
             pass
     if t0 is None:
-        raise RuntimeError("上传连接超时")
+        raise RuntimeError(i18n.t("upload.connect_timeout"))
     if sent < 64_000:
-        raise RuntimeError("上传超时，几乎没发出数据")
+        raise RuntimeError(i18n.t("upload.too_little"))
     return sent, send_dt
 
 
@@ -387,7 +389,7 @@ def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
 
 def _top_lines(rows: list[ProcUse], kind: str) -> str:
     if not rows:
-        return "  (无)"
+        return i18n.t("host.none")
     lines = []
     for item in rows:
         if kind == "rss":
@@ -398,12 +400,19 @@ def _top_lines(rows: list[ProcUse], kind: str) -> str:
 
 
 def format_cpu(info: HostInfo) -> str:
-    return (
-        f"🧮 <b>{h(host_label())} · CPU</b>\n\n"
-        f"利用率 <b>{info.cpu_pct:.1f}%</b>  {progress_bar(info.cpu_pct)}\n"
-        f"steal {info.steal_pct:.1f}% · iowait {info.iowait_pct:.1f}% · {info.nproc} 核\n"
-        f"load {info.load1:.2f} / {info.load5:.2f} / {info.load15:.2f}\n\n"
-        f"<pre>占用最高\n{_top_lines(info.top_cpu, 'cpu')}</pre>"
+    return i18n.t(
+        "host.cpu",
+        name=h(host_label()),
+        pct=info.cpu_pct,
+        bar=progress_bar(info.cpu_pct),
+        steal=info.steal_pct,
+        iowait=info.iowait_pct,
+        nproc=info.nproc,
+        load1=info.load1,
+        load5=info.load5,
+        load15=info.load15,
+        top_title=i18n.t("host.top_cpu"),
+        top=_top_lines(info.top_cpu, "cpu"),
     )
 
 
@@ -412,52 +421,66 @@ def format_mem(info: HostInfo) -> str:
     pct = 100.0 * used / info.mem_total if info.mem_total else 0.0
     swap_used = max(0, info.swap_total - info.swap_free)
     swap_pct = 100.0 * swap_used / info.swap_total if info.swap_total else 0.0
-    return (
-        f"🧠 <b>{h(host_label())} · 内存</b>\n\n"
-        f"RAM <b>{fmt_mib(used)} / {fmt_mib(info.mem_total)}</b>  ({pct:.0f}%)\n"
-        f"{progress_bar(pct)}\n"
-        f"可用 {fmt_mib(info.mem_available)} · swap {fmt_mib(swap_used)} / {fmt_mib(info.swap_total)} ({swap_pct:.0f}%)\n\n"
-        f"<pre>RSS 最高\n{_top_lines(info.top_rss, 'rss')}</pre>"
+    return i18n.t(
+        "host.mem",
+        name=h(host_label()),
+        used=fmt_mib(used),
+        total=fmt_mib(info.mem_total),
+        pct=pct,
+        bar=progress_bar(pct),
+        avail=fmt_mib(info.mem_available),
+        swap_used=fmt_mib(swap_used),
+        swap_total=fmt_mib(info.swap_total),
+        swap_pct=swap_pct,
+        top_title=i18n.t("host.top_rss"),
+        top=_top_lines(info.top_rss, "rss"),
     )
 
 
 def format_disk(info: HostInfo) -> str:
     pct = 100.0 * info.disk_used / info.disk_total if info.disk_total else 0.0
-    return (
-        f"💾 <b>{h(host_label())} · 磁盘 /</b>\n\n"
-        f"<b>{fmt_bytes(info.disk_used)} / {fmt_bytes(info.disk_total)}</b>  ({pct:.0f}%)\n"
-        f"{progress_bar(pct)}\n"
-        f"剩余 {fmt_bytes(info.disk_avail)}"
+    return i18n.t(
+        "host.disk",
+        name=h(host_label()),
+        used=fmt_bytes(info.disk_used),
+        total=fmt_bytes(info.disk_total),
+        pct=pct,
+        bar=progress_bar(pct),
+        avail=fmt_bytes(info.disk_avail),
     )
 
 
 def format_net(info: HostInfo, iface: str) -> str:
-    return (
-        f"🌐 <b>{h(host_label())} · 网卡 {h(iface)}</b>\n\n"
-        f"瞬时  ↓ <b>{h(fmt_bps(info.net_rx_bps))}</b>  ↑ <b>{h(fmt_bps(info.net_tx_bps))}</b>\n"
-        f"采样约 0.4 秒，含入站+出站。"
+    return i18n.t(
+        "host.net",
+        name=h(host_label()),
+        iface=h(iface),
+        rx=h(fmt_bps(info.net_rx_bps)),
+        tx=h(fmt_bps(info.net_tx_bps)),
     )
 
 
 def format_uptime(info: HostInfo) -> str:
     local = info.now.astimezone(CST).strftime("%Y-%m-%d %H:%M:%S")
-    return (
-        f"⏱ <b>{h(host_label())} · 运行时间</b>\n\n"
-        f"已开机 <b>{h(fmt_duration(info.uptime_sec))}</b>\n"
-        f"主机名 <code>{h(info.hostname)}</code>\n"
-        f"北京时间 <code>{h(local)}</code>"
+    return i18n.t(
+        "host.uptime",
+        name=h(host_label()),
+        uptime=h(fmt_duration(info.uptime_sec)),
+        hostname=h(info.hostname),
+        local=h(local),
     )
 
 
 def format_xray(info: HostInfo) -> str:
-    port = "443 通" if info.xray_ok else "443 不通"
+    port = i18n.t("metric.xray_ok") if info.xray_ok else i18n.t("metric.xray_down")
     mark = "✅" if info.xray_ok else "❌"
-    rss = fmt_mib(info.xray_rss) if info.xray_rss else "未找到进程"
-    return (
-        f"🔌 <b>{h(host_label())} · Xray</b>\n\n"
-        f"{mark} {h(port)}\n"
-        f"进程 RSS {h(rss)}\n"
-        f"host 网络，流量走 eth0。"
+    rss = fmt_mib(info.xray_rss) if info.xray_rss else i18n.t("host.no_proc")
+    return i18n.t(
+        "host.xray",
+        name=h(host_label()),
+        mark=mark,
+        port=h(port),
+        rss=h(rss),
     )
 
 
@@ -467,16 +490,25 @@ def format_overview(info: HostInfo, traffic_line: str, iface: str) -> str:
     disk_pct = 100.0 * info.disk_used / info.disk_total if info.disk_total else 0.0
     local = info.now.astimezone(CST).strftime("%m-%d %H:%M")
     xray = "healthy" if info.xray_ok else "down"
-    return (
-        f"🖥 <b>{h(host_label())} 总览</b>  <code>{h(local)}</code>\n\n"
-        f"CPU  <b>{info.cpu_pct:.0f}%</b>  {progress_bar(info.cpu_pct, 12)}  "
-        f"load {info.load1:.2f}\n"
-        f"MEM  <b>{fmt_mib(used)}/{fmt_mib(info.mem_total)}</b>  {progress_bar(mem_pct, 12)}  "
-        f"swap {fmt_mib(max(0, info.swap_total - info.swap_free))}\n"
-        f"DISK <b>{disk_pct:.0f}%</b>  {progress_bar(disk_pct, 12)}  "
-        f"剩 {fmt_bytes(info.disk_avail)}\n"
-        f"NET  ↓{h(fmt_bps(info.net_rx_bps))}  ↑{h(fmt_bps(info.net_tx_bps))}  {h(iface)}\n"
-        f"XRAY {h(xray)}  rss {h(fmt_mib(info.xray_rss) if info.xray_rss else 'n/a')}  "
-        f"up {h(fmt_duration(info.uptime_sec))}\n\n"
-        f"{traffic_line}"
+    return i18n.t(
+        "host.overview",
+        name=h(host_label()),
+        local=h(local),
+        cpu=info.cpu_pct,
+        cpu_bar=progress_bar(info.cpu_pct, 12),
+        load=info.load1,
+        mem_used=fmt_mib(used),
+        mem_total=fmt_mib(info.mem_total),
+        mem_bar=progress_bar(mem_pct, 12),
+        swap=fmt_mib(max(0, info.swap_total - info.swap_free)),
+        disk_pct=disk_pct,
+        disk_bar=progress_bar(disk_pct, 12),
+        disk_avail=fmt_bytes(info.disk_avail),
+        rx=h(fmt_bps(info.net_rx_bps)),
+        tx=h(fmt_bps(info.net_tx_bps)),
+        iface=h(iface),
+        xray=h(xray),
+        rss=h(fmt_mib(info.xray_rss) if info.xray_rss else "n/a"),
+        uptime=h(fmt_duration(info.uptime_sec)),
+        traffic=traffic_line,
     )

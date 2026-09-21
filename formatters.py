@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import hostinfo
+import i18n
 import report
 import util
 
@@ -36,9 +37,10 @@ def _status(row: dict[str, Any]) -> str:
     return "stale"
 
 
-def fleet_overview(rows: list[dict[str, Any]], title: str = "🖥 机群总览") -> str:
+def fleet_overview(rows: list[dict[str, Any]], title: Optional[str] = None) -> str:
+    title = title or i18n.t("fleet.title")
     if not rows:
-        return f"{title}\n\n还没有节点。用 /add 加入。"
+        return i18n.t("fleet.empty", title=title)
     lines = [
         f"{'node':<14} {'used':>7} {'cap':>6} {'pct':>5} {'cpu':>4} {'mem':>4} st",
         "-" * 50,
@@ -64,78 +66,100 @@ def fleet_overview(rows: list[dict[str, Any]], title: str = "🖥 机群总览")
         )
         if row.get("online") and row.get("enabled", True):
             online += 1
-    cap_line = "无限" if not capped else report.fmt_bytes(capped)
+    cap_line = i18n.t("fleet.unlimited") if not capped else report.fmt_bytes(capped)
     return (
         f"{title}\n"
-        f"在线 {online}/{len(rows)} · 有限额度合计 {cap_line} · 当前合计 {report.fmt_bytes(used_all)}\n\n"
+        f"{i18n.t('fleet.summary', online=online, total=len(rows), cap=cap_line, used=report.fmt_bytes(used_all))}\n\n"
         f"<pre>" + "\n".join(lines) + "</pre>\n\n"
-        f"点下面的机器看详情，或点「刷新」。"
+        f"{i18n.t('fleet.hint')}"
     )
 
 
 def node_list(rows: list[dict[str, Any]]) -> str:
     if not rows:
-        return "覆盖范围内没有节点。"
+        return i18n.t("fleet.coverage_empty")
     lines = []
     for row in rows:
         cap = util.format_cap(row.get("cap_bytes"))
         mark = "●" if row.get("online") else "○"
-        flag = "" if row.get("enabled", True) else " [停用]"
+        flag = "" if row.get("enabled", True) else i18n.t("fleet.disabled_flag")
         lines.append(
-            f"{mark} <code>{report.h(row['name'])}</code>  {report.h(cap)}  "
-            f"重置日 {int(row.get('reset_day') or 1)}{flag}"
+            i18n.t(
+                "fleet.coverage_line",
+                mark=mark,
+                name=report.h(row["name"]),
+                cap=report.h(cap),
+                reset=int(row.get("reset_day") or 1),
+                flag=flag,
+            )
         )
-    return "📋 <b>覆盖范围</b>\n\n" + "\n".join(lines) + "\n\n点下面的机器看详情。"
+    return f"{i18n.t('fleet.coverage_title')}\n\n" + "\n".join(lines) + "\n\n" + i18n.t("fleet.coverage_hint")
 
 
 def node_detail(row: dict[str, Any]) -> str:
     snap = row.get("snapshot") or {}
     if not snap:
-        return (
-            f"🖥 <b>{report.h(row['name'])}</b>\n\n"
-            f"还没有心跳。确认 Agent 已安装，且能访问 Hub。"
-        )
+        return i18n.t("node.no_heartbeat", name=report.h(row["name"]))
     cap = row.get("cap_bytes")
     used = int(row.get("used") or 0)
     pct = row.get("pct")
     if cap:
-        table = (
-            f"流量\n"
-            f"  ↓ 入站  {report.fmt_gb(int(snap.get('period_rx') or 0))}\n"
-            f"  ↑ 出站  {report.fmt_gb(int(snap.get('period_tx') or 0))}\n"
-            f"  ∑ 合计  {report.fmt_gb(used)}\n"
-            f"套餐额度  {report.fmt_gb_num(used)} / {int(round(cap / 1_000_000_000))} GB  "
-            f"({pct:.1f}%)"
+        table = "\n".join(
+            [
+                i18n.t("node.traffic"),
+                i18n.t("pre.row_in", label=i18n.t("node.in"), value=report.fmt_gb(int(snap.get("period_rx") or 0))),
+                i18n.t("pre.row_out", label=i18n.t("node.out"), value=report.fmt_gb(int(snap.get("period_tx") or 0))),
+                i18n.t("pre.row_total", label=i18n.t("node.total"), value=report.fmt_gb(used)),
+                i18n.t(
+                    "report.quota",
+                    used=report.fmt_gb_num(used),
+                    cap=int(round(cap / 1_000_000_000)),
+                    pct=pct or 0,
+                ),
+            ]
         )
         bar = f"{report.progress_bar(pct or 0)} {(pct or 0):.1f}%\n"
-        cap_note = "✅ 当前仍在套餐内。" if (pct or 0) < 100 else "⚠️ 已超过套餐额度。"
+        cap_note = i18n.t("node.in_plan") if (pct or 0) < 100 else i18n.t("node.over_plan")
     else:
-        table = (
-            f"流量（无限额度）\n"
-            f"  ↓ 入站  {report.fmt_gb(int(snap.get('period_rx') or 0))}\n"
-            f"  ↑ 出站  {report.fmt_gb(int(snap.get('period_tx') or 0))}\n"
-            f"  ∑ 合计  {report.fmt_gb(used)}"
+        table = "\n".join(
+            [
+                i18n.t("node.traffic_unlimited"),
+                i18n.t("pre.row_in", label=i18n.t("node.in"), value=report.fmt_gb(int(snap.get("period_rx") or 0))),
+                i18n.t("pre.row_out", label=i18n.t("node.out"), value=report.fmt_gb(int(snap.get("period_tx") or 0))),
+                i18n.t("pre.row_total", label=i18n.t("node.total"), value=report.fmt_gb(used)),
+            ]
         )
         bar = ""
-        cap_note = "✅ 这台按无限流量记账。"
+        cap_note = i18n.t("node.unlimited_note")
     mem_used = int(snap.get("mem_total") or 0) - int(snap.get("mem_available") or 0)
     mem_total = int(snap.get("mem_total") or 0)
     xray = "healthy" if snap.get("xray_ok") else "down"
+    net_extra = ""
+    if snap.get("net_window_sec"):
+        net_extra = "  " + str(int(round(float(snap.get("net_window_sec") or 0)))) + "s"
     return (
-        f"🖥 <b>{report.h(row['name'])}</b>  {_status(row)}\n"
-        f"周期 <code>{report.h(snap.get('period_start'))}</code> → "
-        f"<code>{report.h(snap.get('period_end'))}</code>  重置日 {int(row.get('reset_day') or 1)}\n"
-        f"网卡 <code>{report.h(row.get('iface') or snap.get('iface'))}</code>\n\n"
-        f"<pre>{table}</pre>\n"
-        f"{bar}"
-        f"{cap_note}\n\n"
-        f"CPU {float(snap.get('cpu_pct') or 0):.0f}%  "
-        f"MEM {hostinfo.fmt_mib(mem_used)}/{hostinfo.fmt_mib(mem_total)}  "
-        f"DISK {report.fmt_bytes(int(snap.get('disk_used') or 0))}\n"
-        f"NET ↓{hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}  "
-        f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}"
-        f"{('  ' + str(int(round(float(snap.get('net_window_sec') or 0)))) + 's') if snap.get('net_window_sec') else ''}\n"
-        f"XRAY {xray}  up {hostinfo.fmt_duration(float(snap.get('uptime_sec') or 0))}"
+        i18n.t("node.header", name=report.h(row["name"]), status=_status(row)) + "\n"
+        + i18n.t(
+            "node.meta",
+            period=i18n.t("node.period"),
+            start=report.h(snap.get("period_start")),
+            end=report.h(snap.get("period_end")),
+            reset_label=i18n.t("node.reset"),
+            reset=int(row.get("reset_day") or 1),
+            nic=i18n.t("node.nic"),
+            iface=report.h(row.get("iface") or snap.get("iface")),
+        )
+        + "\n\n"
+        + f"<pre>{table}</pre>\n"
+        + bar
+        + f"{cap_note}\n\n"
+        + f"CPU {float(snap.get('cpu_pct') or 0):.0f}%  "
+        + f"MEM {hostinfo.fmt_mib(mem_used)}/{hostinfo.fmt_mib(mem_total)}  "
+        + f"DISK {report.fmt_bytes(int(snap.get('disk_used') or 0))}\n"
+        + f"NET ↓{hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}  "
+        + f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}"
+        + f"{net_extra}\n"
+        + f"XRAY {xray}  up {hostinfo.fmt_duration(float(snap.get('uptime_sec') or 0))}"
     )
 
 
@@ -143,66 +167,77 @@ def metric_block(row: dict[str, Any], kind: str) -> str:
     snap = row.get("snapshot") or {}
     name = row["name"]
     if not snap:
-        return f"{report.h(name)} 还没有数据。"
+        return i18n.t("node.no_data", name=report.h(name))
     if kind == "cpu":
-        return (
-            f"🧮 <b>{report.h(name)} · CPU</b>\n\n"
-            f"{float(snap.get('cpu_pct') or 0):.1f}%  "
-            f"{report.progress_bar(float(snap.get('cpu_pct') or 0))}\n"
-            f"load {float(snap.get('load1') or 0):.2f} · {int(snap.get('nproc') or 1)} 核 · "
-            f"steal {float(snap.get('steal_pct') or 0):.1f}%"
+        return i18n.t(
+            "metric.cpu",
+            name=report.h(name),
+            pct=float(snap.get("cpu_pct") or 0),
+            bar=report.progress_bar(float(snap.get("cpu_pct") or 0)),
+            load=float(snap.get("load1") or 0),
+            nproc=int(snap.get("nproc") or 1),
+            steal=float(snap.get("steal_pct") or 0),
         )
     if kind == "mem":
         total = int(snap.get("mem_total") or 0)
         used = total - int(snap.get("mem_available") or 0)
         pct = _mem_pct(snap)
         swap_used = int(snap.get("swap_total") or 0) - int(snap.get("swap_free") or 0)
-        return (
-            f"🧠 <b>{report.h(name)} · 内存</b>\n\n"
-            f"{hostinfo.fmt_mib(used)} / {hostinfo.fmt_mib(total)}  ({pct:.0f}%)\n"
-            f"{report.progress_bar(pct)}\n"
-            f"swap {hostinfo.fmt_mib(swap_used)} / {hostinfo.fmt_mib(int(snap.get('swap_total') or 0))}"
+        return i18n.t(
+            "metric.mem",
+            name=report.h(name),
+            used=hostinfo.fmt_mib(used),
+            total=hostinfo.fmt_mib(total),
+            pct=pct,
+            bar=report.progress_bar(pct),
+            swap_used=hostinfo.fmt_mib(swap_used),
+            swap_total=hostinfo.fmt_mib(int(snap.get("swap_total") or 0)),
         )
     if kind == "disk":
         total = int(snap.get("disk_total") or 0) or 1
         used = int(snap.get("disk_used") or 0)
         pct = 100.0 * used / total
-        return (
-            f"💾 <b>{report.h(name)} · 磁盘</b>\n\n"
-            f"{report.fmt_bytes(used)} / {report.fmt_bytes(total)}  ({pct:.0f}%)\n"
-            f"{report.progress_bar(pct)}\n"
-            f"剩余 {report.fmt_bytes(int(snap.get('disk_avail') or 0))}"
+        return i18n.t(
+            "metric.disk",
+            name=report.h(name),
+            used=report.fmt_bytes(used),
+            total=report.fmt_bytes(total),
+            pct=pct,
+            bar=report.progress_bar(pct),
+            avail=report.fmt_bytes(int(snap.get("disk_avail") or 0)),
         )
     if kind == "net":
         window = float(snap.get("net_window_sec") or 0)
-        window_s = f"近 {window:.0f} 秒均值" if window >= 1 else "还没有足够采样窗口"
-        return (
-            f"🌐 <b>{report.h(name)} · 网速</b>\n\n"
-            f"↓ {hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}\n"
-            f"↑ {hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}\n"
-            f"{window_s}。点「网速」会再采 3 秒网卡；点「测速」才打流。"
+        window_s = i18n.t("metric.net_avg", sec=window) if window >= 1 else i18n.t("metric.net_avg_none")
+        return i18n.t(
+            "metric.net",
+            name=report.h(name),
+            rx=hostinfo.fmt_bps(float(snap.get("net_rx_bps") or 0)),
+            tx=hostinfo.fmt_bps(float(snap.get("net_tx_bps") or 0)),
+            window=f"{window_s}. {i18n.t('metric.net_hint')}",
         )
     if kind == "today":
-        return (
-            f"📅 <b>{report.h(name)} · 今日</b>\n\n"
-            f"<pre>"
-            f"  ↓ 入站  {report.fmt_gb(int(snap.get('today_rx') or 0))}\n"
-            f"  ↑ 出站  {report.fmt_gb(int(snap.get('today_tx') or 0))}\n"
-            f"  ∑ 合计  {report.fmt_gb(int(snap.get('today_total') or 0))}"
-            f"</pre>"
+        return i18n.t(
+            "metric.today",
+            name=report.h(name),
+            rx=report.fmt_gb(int(snap.get("today_rx") or 0)),
+            tx=report.fmt_gb(int(snap.get("today_tx") or 0)),
+            total=report.fmt_gb(int(snap.get("today_total") or 0)),
         )
     if kind == "xray":
         ok = bool(snap.get("xray_ok"))
-        return (
-            f"🔌 <b>{report.h(name)} · Xray</b>\n\n"
-            f"{'✅ 443 通' if ok else '❌ 443 不通'}\n"
-            f"RSS {hostinfo.fmt_mib(int(snap.get('xray_rss') or 0))}"
+        return i18n.t(
+            "metric.xray",
+            name=report.h(name),
+            status=i18n.t("metric.xray_ok") if ok else i18n.t("metric.xray_down"),
+            rss=hostinfo.fmt_mib(int(snap.get("xray_rss") or 0)),
         )
     if kind == "uptime":
-        return (
-            f"⏱ <b>{report.h(name)} · 运行时间</b>\n\n"
-            f"{hostinfo.fmt_duration(float(snap.get('uptime_sec') or 0))}\n"
-            f"<code>{report.h(snap.get('hostname') or '')}</code>"
+        return i18n.t(
+            "metric.uptime",
+            name=report.h(name),
+            uptime=hostinfo.fmt_duration(float(snap.get("uptime_sec") or 0)),
+            hostname=report.h(snap.get("hostname") or ""),
         )
     return node_detail(row)
 
@@ -214,19 +249,28 @@ def nic_result(name: str, data: dict[str, Any], row: Optional[dict[str, Any]] = 
     window = float(snap.get("net_window_sec") or 0)
     avg = ""
     if window >= 1:
-        avg = (
-            f"\n近 {window:.0f} 秒均值  "
-            f"↓{hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}  "
-            f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}"
+        avg = i18n.t(
+            "nic.avg",
+            sec=window,
+            rx=hostinfo.fmt_bps(float(snap.get("net_rx_bps") or 0)),
+            tx=hostinfo.fmt_bps(float(snap.get("net_tx_bps") or 0)),
         )
     return (
-        f"🌐 <b>{report.h(name)} 当前网卡</b>  {seconds:.1f}s · <code>{report.h(iface)}</code>\n\n"
-        f"<pre>"
-        f"  ↓ 入  {hostinfo.fmt_bps(float(data.get('rx_bps') or 0)):>12}  {report.fmt_bytes(int(data.get('rx_bytes') or 0))}\n"
-        f"  ↑ 出  {hostinfo.fmt_bps(float(data.get('tx_bps') or 0)):>12}  {report.fmt_bytes(int(data.get('tx_bytes') or 0))}"
-        f"</pre>"
-        f"{avg}\n"
-        f"这是网卡正在走的流量，不是公网带宽。要测带宽请点「测速」。"
+        i18n.t("nic.title", name=report.h(name), seconds=seconds, iface=report.h(iface))
+        + "\n\n<pre>"
+        + i18n.t(
+            "nic.row_in",
+            bps=hostinfo.fmt_bps(float(data.get("rx_bps") or 0)),
+            nbytes=report.fmt_bytes(int(data.get("rx_bytes") or 0)),
+        )
+        + "\n"
+        + i18n.t(
+            "nic.row_out",
+            bps=hostinfo.fmt_bps(float(data.get("tx_bps") or 0)),
+            nbytes=report.fmt_bytes(int(data.get("tx_bytes") or 0)),
+        )
+        + f"</pre>{avg}\n"
+        + i18n.t("nic.hint")
     )
 
 
@@ -237,27 +281,35 @@ def bw_result(name: str, data: dict[str, Any]) -> str:
     up_sec = float(data.get("up_sec") or 0)
     extra = ""
     if data.get("up_error") or (tx_bps <= 0 and up_sec <= 0):
-        reason = data.get("up_error") or "上传超时"
-        extra = f"\n下载已出结果。上传失败，上行未计入：{report.h(reason)}"
+        reason = data.get("up_error") or i18n.t("speed.up_timeout")
+        extra = i18n.t("speed.up_fail", reason=report.h(reason))
     return (
-        f"📡 <b>{report.h(name)} 公网测速</b>\n\n"
-        f"<pre>"
-        f"  ↓ 下载  {hostinfo.fmt_bps(rx_bps):>12}  {report.fmt_bytes(int(data.get('rx_bytes') or 0))} / {down_sec:.1f}s\n"
-        f"  ↑ 上传  {hostinfo.fmt_bps(tx_bps):>12}  {report.fmt_bytes(int(data.get('tx_bytes') or 0))} / {up_sec:.1f}s\n"
-        f"</pre>\n"
-        f"对 Cloudflare 主动拉流/推流，测的是公网带宽，不是网卡空闲占用。"
-        f"{extra}"
+        i18n.t("speed.title", name=report.h(name))
+        + "\n\n<pre>"
+        + i18n.t(
+            "speed.row_down",
+            bps=hostinfo.fmt_bps(rx_bps),
+            nbytes=report.fmt_bytes(int(data.get("rx_bytes") or 0)),
+            sec=down_sec,
+        )
+        + "\n"
+        + i18n.t(
+            "speed.row_up",
+            bps=hostinfo.fmt_bps(tx_bps),
+            nbytes=report.fmt_bytes(int(data.get("tx_bytes") or 0)),
+            sec=up_sec,
+        )
+        + "\n</pre>\n"
+        + i18n.t("speed.hint")
+        + extra
     )
 
 
 def add_help(name: str, hub_url: str, cap_text: str, reset_day: int) -> str:
-    return (
-        f"已纳入覆盖：<code>{report.h(name)}</code>\n"
-        f"额度 {report.h(cap_text)} · 重置日 {reset_day}\n\n"
-        f"在目标机执行：\n"
-        f"<pre>sudo ./install-host.sh --role agent \\\n"
-        f"  --hub {report.h(hub_url)} \\\n"
-        f"  --name {report.h(name)}</pre>\n"
-        f"Fleet token 与 Hub 相同，写在那台机的 "
-        f"<code>/etc/traffic-monitor.env</code>。"
+    return i18n.t(
+        "add.done",
+        name=report.h(name),
+        cap=report.h(cap_text),
+        reset=reset_day,
+        hub=report.h(hub_url),
     )

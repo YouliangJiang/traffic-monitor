@@ -56,7 +56,8 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" ]]; then
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py \
+for required in report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py \
+    locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer; do
     if [[ ! -f "$bundle_dir/$required" ]]; then
@@ -104,6 +105,12 @@ opt = pathlib.Path("/opt/traffic-monitor")
 opt.mkdir(parents=True, exist_ok=True)
 for src in bundle.glob("*.py"):
     dest = opt / src.name
+    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    dest.chmod(0o644)
+loc = opt / "locales"
+loc.mkdir(parents=True, exist_ok=True)
+for src in (bundle / "locales").glob("*.json"):
+    dest = loc / src.name
     dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
     dest.chmod(0o644)
 opt.chmod(0o755)
@@ -173,6 +180,7 @@ merged = {
     "TELEGRAM_BOT_TOKEN": keep("TELEGRAM_BOT_TOKEN"),
     "TELEGRAM_CHAT_ID": keep("TELEGRAM_CHAT_ID"),
     "HUB_CA": keep("HUB_CA", "/var/lib/traffic-monitor/hub.crt"),
+    "UI_LANG": keep("UI_LANG", "zh"),
 }
 if role == "hub" and not merged["TELEGRAM_BOT_TOKEN"]:
     raise SystemExit("hub role needs TELEGRAM_BOT_TOKEN in /etc/traffic-monitor.env")

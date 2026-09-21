@@ -17,6 +17,7 @@ import hostinfo
 import report
 import snapshot
 import util
+import i18n
 
 STALE_AFTER = 90
 MAX_JOB_WAIT = 50
@@ -99,7 +100,7 @@ class Hub:
     def add_node(self, name: str, cap: Optional[int], reset_day: int, iface: str, note: str = "") -> dict[str, Any]:
         name = util.normalize_node_name(name)
         if not util.valid_node_name(name):
-            raise ValueError("名字只能用小写字母、数字和短横线，例如 hk-1")
+            raise ValueError(i18n.t("hub.bad_name"))
         self.kicked.discard(name)
         rec = self.nodes.get(name) or {}
         rec.update(
@@ -304,10 +305,12 @@ class Hub:
                 continue
             rec["fired"] = sorted(fired | set(newly))
             changed = True
-            marks = "、".join(f"{m}%" for m in newly)
-            text = (
-                f"🚨 <b>{report.h(name)}</b> 流量跨过 {marks}\n"
-                f"{formatters.node_detail(row)}"
+            marks = i18n.t("sep.list").join(f"{m}%" for m in newly)
+            text = i18n.t(
+                "hub.alert",
+                name=report.h(name),
+                marks=marks,
+                detail=formatters.node_detail(row),
             )
             try:
                 report.send_telegram(token, chat_id, text)
@@ -603,7 +606,7 @@ def daily_report() -> None:
     rows = util.http_json("GET", f"{fleet}/v1/nodes", util.env("FLEET_TOKEN"), timeout=15)
     import formatters
 
-    text = formatters.fleet_overview(rows.get("nodes") or [], title="📊 机群日报")
+    text = formatters.fleet_overview(rows.get("nodes") or [], title=i18n.t("fleet.daily_title"))
     report.send_telegram(token, chat_id, text)
     print("daily report sent", flush=True)
 

@@ -10,28 +10,30 @@ import urllib.error
 from typing import Any, Optional
 
 import formatters
+import i18n
 import report
 import util
 
-COMMANDS = [
-    {"command": "all", "description": "全部服务器总览"},
-    {"command": "nodes", "description": "覆盖范围内的节点列表"},
-    {"command": "go", "description": "查看指定节点，例如 /go sg"},
-    {"command": "traffic", "description": "流量：/traffic 或 /traffic 名字"},
-    {"command": "today", "description": "今日流量"},
-    {"command": "cpu", "description": "CPU：/cpu 或 /cpu all"},
-    {"command": "mem", "description": "内存"},
-    {"command": "disk", "description": "磁盘"},
-    {"command": "net", "description": "网卡当前吞吐：/net 或 /net 名字"},
-    {"command": "bw", "description": "公网测速：/bw 名字 [秒]"},
-    {"command": "xray", "description": "Xray / 443"},
-    {"command": "uptime", "description": "开机时长"},
-    {"command": "add", "description": "纳入节点：/add 名字 cap=2T"},
-    {"command": "cap", "description": "改额度：/cap 名字 500G|2T|unlimited"},
-    {"command": "kick", "description": "踢出覆盖：/kick 名字"},
-    {"command": "off", "description": "停用但仍保留：/off 名字"},
-    {"command": "on", "description": "重新启用：/on 名字"},
-    {"command": "help", "description": "命令说明"},
+COMMAND_KEYS = [
+    "all",
+    "nodes",
+    "go",
+    "traffic",
+    "today",
+    "cpu",
+    "mem",
+    "disk",
+    "net",
+    "bw",
+    "xray",
+    "uptime",
+    "add",
+    "cap",
+    "kick",
+    "off",
+    "on",
+    "help",
+    "lang",
 ]
 
 ALIASES = {
@@ -68,45 +70,23 @@ ALIASES = {
     "节点": "nodes",
     "带宽": "bw",
     "流量": "traffic",
+    "/lang": "lang",
+    "/en": "lang_en",
+    "/zh": "lang_zh",
+    "english": "lang_en",
+    "中文": "lang_zh",
 }
-
-KIND_LABEL = {
-    "cpu": "CPU",
-    "mem": "内存",
-    "disk": "磁盘",
-    "net": "网速",
-    "today": "今日流量",
-    "xray": "Xray",
-    "uptime": "运行时间",
-    "traffic": "详情",
-}
-
-HELP = (
-    "🤖 <b>机群监控</b>\n\n"
-    "点消息下面的按钮就能看机器，不用打节点名。\n"
-    "/all 总览，/nodes 列表，点一台进详情。\n\n"
-    "<b>查看</b>（仍可手打）\n"
-    "/go 名字  一台详情\n"
-    "/cpu /mem /disk /today /traffic /net /xray /uptime\n"
-    "可加名字或 all，例如 <code>/cpu all</code>\n\n"
-    "<b>网速</b>（读网卡当前吞吐，不打流）\n"
-    "<code>/net sg</code>  默认采 3 秒\n"
-    "<code>/net all</code>\n\n"
-    "<b>公网测速</b>（对 Cloudflare 拉流/推流）\n"
-    "<code>/bw sg</code>  默认各 3 秒\n"
-    "<code>/bw sg 8</code>  1–15 秒\n"
-    "<code>/bw all</code>\n\n"
-    "<b>覆盖范围</b>（手打，避免误触）\n"
-    "<code>/add hk cap=2T reset=27</code>\n"
-    "<code>/cap hk 500G</code>\n"
-    "<code>/off hk</code>  暂时不看\n"
-    "<code>/on hk</code>\n"
-    "<code>/kick hk</code>  踢出，需再 /add 才会重新纳入\n\n"
-    "额度支持 500G / 1T / 2T / unlimited。日报仍会自动发。"
-)
 
 ALLOWED_UPDATES = ["message", "callback_query"]
-METRIC_KINDS = set(KIND_LABEL)
+METRIC_KINDS = {"cpu", "mem", "disk", "net", "today", "xray", "uptime", "traffic"}
+
+
+def bot_commands() -> list[dict[str, str]]:
+    return [{"command": key, "description": i18n.t(f"cmd.{key}")} for key in COMMAND_KEYS]
+
+
+def kind_label(kind: str) -> str:
+    return i18n.t(f"kind.{kind}") if kind else kind
 
 
 class Reply:
@@ -163,6 +143,10 @@ def _btn(text: str, data: str) -> dict[str, str]:
     return {"text": text, "callback_data": data}
 
 
+def lang_row() -> list[dict[str, str]]:
+    return [_btn(i18n.t("btn.lang_zh"), "lang:zh"), _btn(i18n.t("btn.lang_en"), "lang:en")]
+
+
 def _markup(rows: list[list[dict[str, str]]]) -> dict[str, Any]:
     return {"inline_keyboard": rows}
 
@@ -176,7 +160,7 @@ def _node_mark(row: dict[str, Any]) -> str:
 
 
 def _node_button_label(row: dict[str, Any]) -> str:
-    extra = " 停" if not row.get("enabled", True) else ""
+    extra = i18n.t("btn.disabled") if not row.get("enabled", True) else ""
     return f"{_node_mark(row)} {row['name']}{extra}"
 
 
@@ -185,14 +169,16 @@ def home_keyboard(rows: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]
     keyboard: list[list[dict[str, str]]] = []
     for row in rows:
         keyboard.append([_btn(_node_button_label(row), f"go:{row['name']}")])
-    keyboard.append([_btn("刷新", "home")])
+    keyboard.append([_btn(i18n.t("btn.refresh"), "home")])
+    keyboard.append(lang_row())
     return _markup(keyboard)
 
 
 def help_keyboard() -> dict[str, Any]:
     return _markup(
         [
-            [_btn("机群总览", "home"), _btn("节点列表", "nodes")],
+            [_btn(i18n.t("btn.overview"), "home"), _btn(i18n.t("btn.nodes"), "nodes")],
+            lang_row(),
         ]
     )
 
@@ -205,8 +191,8 @@ def pick_keyboard(action: str, rows: Optional[list[dict[str, Any]]] = None) -> d
             continue
         keyboard.append([_btn(_node_button_label(row), f"{action}:{row['name']}")])
     if action.startswith("m:") or action == "bw":
-        keyboard.append([_btn("全部", f"{action}:all")])
-    keyboard.append([_btn("« 总览", "home")])
+        keyboard.append([_btn(i18n.t("btn.all"), f"{action}:all")])
+    keyboard.append([_btn(i18n.t("btn.back"), "home")])
     return _markup(keyboard)
 
 
@@ -214,10 +200,10 @@ def node_keyboard(name: str) -> dict[str, Any]:
     name = util.normalize_node_name(name)
     return _markup(
         [
-            [_btn("今日", f"m:today:{name}"), _btn("CPU", f"m:cpu:{name}"), _btn("内存", f"m:mem:{name}")],
-            [_btn("磁盘", f"m:disk:{name}"), _btn("网速", f"m:net:{name}"), _btn("Xray", f"m:xray:{name}")],
-            [_btn("运行时间", f"m:uptime:{name}"), _btn("测速", f"bw:{name}")],
-            [_btn("« 总览", "home"), _btn("刷新", f"go:{name}")],
+            [_btn(i18n.t("btn.today"), f"m:today:{name}"), _btn(i18n.t("btn.cpu"), f"m:cpu:{name}"), _btn(i18n.t("btn.mem"), f"m:mem:{name}")],
+            [_btn(i18n.t("btn.disk"), f"m:disk:{name}"), _btn(i18n.t("btn.net"), f"m:net:{name}"), _btn(i18n.t("btn.xray"), f"m:xray:{name}")],
+            [_btn(i18n.t("btn.uptime"), f"m:uptime:{name}"), _btn(i18n.t("btn.speedtest"), f"bw:{name}")],
+            [_btn(i18n.t("btn.back"), "home"), _btn(i18n.t("btn.refresh"), f"go:{name}")],
         ]
     )
 
@@ -246,6 +232,10 @@ def parse_message(text: str) -> tuple[str, list[str], dict[str, str]]:
     first = re.sub(r"@\w+$", "", bits[0])
     key = first.lower() if first.startswith("/") else first
     cmd = ALIASES.get(first.lower() if first.startswith("/") else first, ALIASES.get(key, ""))
+    if cmd == "lang_en":
+        return "lang", ["en"], {}
+    if cmd == "lang_zh":
+        return "lang", ["zh"], {}
     args: list[str] = []
     flags: dict[str, str] = {}
     for tok in bits[1:]:
@@ -267,6 +257,8 @@ def parse_callback(data: str) -> tuple[str, list[str]]:
         return "go", [raw.split(":", 1)[1]]
     if raw.startswith("bw:"):
         return "bw", [raw.split(":", 1)[1]]
+    if raw.startswith("lang:"):
+        return "lang", [raw.split(":", 1)[1]]
     if raw.startswith("m:"):
         parts = raw.split(":")
         if len(parts) >= 3 and parts[1] in METRIC_KINDS:
@@ -289,50 +281,40 @@ def loading_text(data: str) -> str:
     if cmd == "bw":
         target = args[0] if args else ""
         if target == "all":
-            return (
-                "⏳ <b>正在测速</b>\n\n"
-                "全部机器对 Cloudflare 下载+上传，大约十几秒。\n"
-                "完成后这条消息会换成结果。"
-            )
-        name = report.h(util.normalize_node_name(target) if target else "节点")
-        return (
-            f"⏳ <b>正在测速</b> <code>{name}</code>\n\n"
-            f"对 Cloudflare 下载、上传各约 3 秒，请稍候。\n"
-            f"完成后这条消息会换成结果。"
-        )
+            return i18n.t("loading.speed_all")
+        name = report.h(util.normalize_node_name(target) if target else i18n.t("node.placeholder"))
+        return i18n.t("loading.speed_one", name=name)
     if cmd == "metric" and args[:1] == ["net"]:
         target = args[1] if len(args) > 1 else ""
         if target == "all":
-            return "⏳ <b>正在读网卡</b>\n\n全部机器各采约 3 秒，不打流。"
-        name = report.h(util.normalize_node_name(target) if target else "节点")
-        return (
-            f"⏳ <b>正在读网卡</b> <code>{name}</code>\n\n"
-            f"采样约 3 秒当前吞吐，不打流。"
-        )
+            return i18n.t("loading.nic_all")
+        name = report.h(util.normalize_node_name(target) if target else i18n.t("node.placeholder"))
+        return i18n.t("loading.nic_one", name=name)
     if cmd == "metric" and args:
-        label = KIND_LABEL.get(args[0], args[0])
+        label = kind_label(args[0])
         target = args[1] if len(args) > 1 else ""
-        extra = f" <code>{report.h(target)}</code>" if target and target != "all" else ""
-        return f"⏳ 正在查询{report.h(label)}{extra}…"
+        extra = i18n.t("loading.metric_extra", name=report.h(target)) if target and target != "all" else ""
+        return i18n.t("loading.metric", label=report.h(label), extra=extra)
     labels = {
-        "home": "正在刷新总览",
-        "nodes": "正在拉取节点",
-        "help": "正在打开帮助",
-        "go": "正在打开详情",
+        "home": i18n.t("loading.home"),
+        "nodes": i18n.t("loading.nodes"),
+        "help": i18n.t("loading.help"),
+        "go": i18n.t("loading.go"),
+        "lang": i18n.t("loading.generic"),
     }
-    return f"⏳ {labels.get(cmd, '处理中')}…"
+    return i18n.t("loading.prefix", text=labels.get(cmd, i18n.t("loading.generic")))
 
 
 def toast_for_reply(text: str, status: str) -> str:
     if status == "failed":
-        return "更新失败"
+        return i18n.t("toast.update_failed")
     if status == "unchanged":
-        return "已是最新"
+        return i18n.t("toast.latest")
     stripped = text.lstrip()
-    if stripped.startswith("⏱") or "超时" in stripped[:80]:
-        return "超时"
-    if stripped.startswith("❌") or stripped.startswith("查询失败"):
-        return "失败"
+    if stripped.startswith("⏱"):
+        return i18n.t("toast.timeout")
+    if stripped.startswith("❌"):
+        return i18n.t("toast.failed")
     return ""
 
 
@@ -343,7 +325,7 @@ def send_reply(
     edit_message_id: Optional[int] = None,
 ) -> str:
     """Send or edit. Returns 'edited', 'sent', 'unchanged', or 'failed'."""
-    text = clip_text(_with_stamp(reply.text or "（空）"))
+    text = clip_text(_with_stamp(reply.text or i18n.t("empty")))
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "text": text,
@@ -405,11 +387,11 @@ def view_home() -> Reply:
 
 def view_nodes() -> Reply:
     rows = nodes(True)
-    return Reply(formatters.fleet_overview(rows, title="📋 覆盖范围"), home_keyboard(rows))
+    return Reply(formatters.fleet_overview(rows, title=i18n.t("fleet.coverage_title")), home_keyboard(rows))
 
 
 def view_help() -> Reply:
-    return Reply(HELP, help_keyboard())
+    return Reply(i18n.t("help.body"), help_keyboard())
 
 
 def view_go(name: str) -> Reply:
@@ -425,7 +407,7 @@ def view_metric(kind: str, target: str) -> Reply:
     rows = nodes(False)
     if target == "all":
         chunks = [formatters.metric_block(row, kind) for row in rows]
-        text = "\n\n".join(chunks) if chunks else "没有在线覆盖的节点。"
+        text = "\n\n".join(chunks) if chunks else i18n.t("no_online_nodes")
         return Reply(text, home_keyboard(rows))
     name = util.normalize_node_name(target)
     if kind == "traffic":
@@ -437,7 +419,7 @@ def view_pick(kind_or_bw: str) -> Reply:
     rows = nodes(False)
     enabled = [row for row in rows if row.get("enabled", True)]
     if not enabled:
-        return Reply("没有节点。", home_keyboard(rows))
+        return Reply(i18n.t("no_nodes"), home_keyboard(rows))
     if len(enabled) == 1:
         name = enabled[0]["name"]
         if kind_or_bw == "bw":
@@ -446,11 +428,11 @@ def view_pick(kind_or_bw: str) -> Reply:
             return view_go(name)
         return view_metric(kind_or_bw, name)
     if kind_or_bw == "bw":
-        return Reply("测哪一台的带宽？", pick_keyboard("bw", enabled))
+        return Reply(i18n.t("pick.speed"), pick_keyboard("bw", enabled))
     if kind_or_bw in {"go", "traffic"}:
-        return Reply("看哪一台？", pick_keyboard("go", enabled))
-    label = KIND_LABEL.get(kind_or_bw, kind_or_bw)
-    return Reply(f"看哪一台的{label}？", pick_keyboard(f"m:{kind_or_bw}", enabled))
+        return Reply(i18n.t("pick.node"), pick_keyboard("go", enabled))
+    label = kind_label(kind_or_bw)
+    return Reply(i18n.t("pick.metric", label=label), pick_keyboard(f"m:{kind_or_bw}", enabled))
 
 
 def cmd_help(_: list[str], __: dict[str, str]) -> Reply:
@@ -528,32 +510,27 @@ def _format_job_result(name: str, job_type: str, data: dict[str, Any]) -> str:
     return formatters.bw_result(name, data)
 
 
+def _job_label(job_type: str) -> str:
+    return i18n.t("job.nic") if job_type == "nic" else i18n.t("job.speed")
+
+
 def _await_job(name: str, job_id: str, job_type: str) -> str:
-    label = "网卡采样" if job_type == "nic" else "测速"
+    label = _job_label(job_type)
     try:
         job = hub_call("GET", f"/v1/jobs/{job_id}?wait=1", timeout=55).get("job") or {}
     except Exception as exc:
-        return (
-            f"❌ <b>{report.h(name)}</b> {label}失败\n\n"
-            f"{report.h(exc)}"
-        )
+        return i18n.t("job.fail", name=report.h(name), label=label, err=report.h(exc))
     status = str(job.get("status") or "unknown")
     if status != "ok":
         err = str(job.get("error") or status)
         if status in {"timeout", "queued", "running"} or err == "timeout":
-            return (
-                f"⏱ <b>{report.h(name)}</b> {label}超时\n\n"
-                f"超过约 50 秒还没有结果。节点可能掉线或正在忙，请再点一次。"
-            )
-        return (
-            f"❌ <b>{report.h(name)}</b> {label}失败\n\n"
-            f"{report.h(err)}"
-        )
+            return i18n.t("job.timeout", name=report.h(name), label=label)
+        return i18n.t("job.fail", name=report.h(name), label=label, err=report.h(err))
     return _format_job_result(name, job_type, job.get("result") or {})
 
 
 def _run_job(name: str, job_type: str, seconds: float) -> str:
-    label = "网卡采样" if job_type == "nic" else "测速"
+    label = _job_label(job_type)
     try:
         created = hub_call(
             "POST",
@@ -561,21 +538,18 @@ def _run_job(name: str, job_type: str, seconds: float) -> str:
             {"node": name, "type": job_type, "params": {"seconds": seconds}},
         )
     except Exception as exc:
-        return (
-            f"❌ <b>{report.h(name)}</b> 无法提交{label}任务\n\n"
-            f"{report.h(exc)}"
-        )
+        return i18n.t("job.submit_fail", name=report.h(name), label=label, err=report.h(exc))
     job_id = created.get("id")
     if not job_id:
-        return f"❌ <b>{report.h(name)}</b> 无法提交{label}任务\n\nHub 没有返回任务 id。"
+        return i18n.t("job.no_id", name=report.h(name), label=label)
     return _await_job(name, str(job_id), job_type)
 
 
 def _run_jobs_all(job_type: str, seconds: float) -> Reply:
-    label = "网卡采样" if job_type == "nic" else "测速"
+    label = _job_label(job_type)
     rows = [row for row in nodes(False) if row.get("enabled", True)]
     if not rows:
-        return Reply("没有节点。", home_keyboard([]))
+        return Reply(i18n.t("no_nodes"), home_keyboard([]))
     started: list[tuple[str, str]] = []
     chunks: list[str] = []
     for row in rows:
@@ -587,17 +561,15 @@ def _run_jobs_all(job_type: str, seconds: float) -> Reply:
             )
             job_id = created.get("id")
             if not job_id:
-                chunks.append(
-                    f"❌ <b>{report.h(row['name'])}</b> 无法提交{label}任务\n\nHub 没有返回任务 id。"
-                )
+                chunks.append(i18n.t("job.no_id", name=report.h(row["name"]), label=label))
                 continue
             started.append((row["name"], str(job_id)))
         except Exception as exc:
             chunks.append(
-                f"❌ <b>{report.h(row['name'])}</b> 无法提交{label}任务\n\n{report.h(exc)}"
+                i18n.t("job.submit_fail", name=report.h(row["name"]), label=label, err=report.h(exc))
             )
     chunks.extend(_await_job(name, job_id, job_type) for name, job_id in started)
-    text = "\n\n".join(chunks) if chunks else f"没有可{label}的节点。"
+    text = "\n\n".join(chunks) if chunks else i18n.t("job.none", label=label)
     return Reply(text, home_keyboard(rows))
 
 
@@ -633,7 +605,7 @@ def cmd_nic(args: list[str], _: dict[str, str]) -> Reply:
 
 def cmd_add(args: list[str], flags: dict[str, str]) -> Reply:
     if not args:
-        return Reply("用法：<code>/add hk cap=2T reset=27</code>", help_keyboard())
+        return Reply(i18n.t("usage.add"), help_keyboard())
     name = args[0]
     cap_text = flags.get("cap", "unlimited")
     cap = util.parse_cap(cap_text)
@@ -658,44 +630,55 @@ def cmd_add(args: list[str], flags: dict[str, str]) -> Reply:
 
 def cmd_cap(args: list[str], flags: dict[str, str]) -> Reply:
     if len(args) < 2:
-        return Reply("用法：<code>/cap hk 2T</code> 或 <code>/cap hk unlimited</code>", help_keyboard())
+        return Reply(i18n.t("usage.cap"), help_keyboard())
     cap = util.parse_cap(args[1])
     hub_call("POST", "/v1/nodes", {"action": "cap", "name": args[0], "cap_bytes": cap})
     name = util.normalize_node_name(args[0])
-    return Reply(f"{report.h(name)} 额度已改为 {report.h(util.format_cap(cap))}", node_keyboard(name))
+    return Reply(i18n.t("cap.changed", name=report.h(name), cap=report.h(util.format_cap(cap))), node_keyboard(name))
 
 
 def cmd_kick(args: list[str], _: dict[str, str]) -> Reply:
     if not args:
-        return Reply("用法：<code>/kick hk</code>", help_keyboard())
+        return Reply(i18n.t("usage.kick"), help_keyboard())
     hub_call("POST", "/v1/nodes", {"action": "kick", "name": args[0]})
     return Reply(
-        f"已踢出 <code>{report.h(util.normalize_node_name(args[0]))}</code>。再接入需要重新 /add。",
+        i18n.t("kicked", name=report.h(util.normalize_node_name(args[0]))),
         home_keyboard(),
     )
 
 
 def cmd_on(args: list[str], _: dict[str, str]) -> Reply:
     if not args:
-        return Reply("用法：<code>/on hk</code>", help_keyboard())
+        return Reply(i18n.t("usage.on"), help_keyboard())
     hub_call("POST", "/v1/nodes", {"action": "enable", "name": args[0]})
     name = util.normalize_node_name(args[0])
-    return Reply(f"已启用 <code>{report.h(name)}</code>", node_keyboard(name))
+    return Reply(i18n.t("enabled", name=report.h(name)), node_keyboard(name))
 
 
 def cmd_off(args: list[str], _: dict[str, str]) -> Reply:
     if not args:
-        return Reply("用法：<code>/off hk</code>", help_keyboard())
+        return Reply(i18n.t("usage.off"), help_keyboard())
     hub_call("POST", "/v1/nodes", {"action": "disable", "name": args[0]})
     name = util.normalize_node_name(args[0])
     return Reply(
-        f"已停用 <code>{report.h(name)}</code>（机器还在，只是不汇总）",
+        i18n.t("disabled", name=report.h(name)),
         home_keyboard(),
     )
 
 
+def cmd_lang(args: list[str], _: dict[str, str]) -> Reply:
+    code = (args[0] if args else "").strip().lower()
+    i18n.set_lang(code)
+    try:
+        register_bot(util.env("TELEGRAM_BOT_TOKEN"))
+    except Exception:
+        pass
+    return Reply(i18n.t("lang.switched") + "\n\n" + i18n.t("help.body"), help_keyboard())
+
+
 HANDLERS = {
     "help": cmd_help,
+    "lang": cmd_lang,
     "all": cmd_all,
     "nodes": cmd_nodes,
     "go": cmd_go,
@@ -726,7 +709,7 @@ def handle(text: str) -> Reply:
         if key in names:
             return view_go(key)
         if stripped.startswith("/") or (stripped and " " not in stripped and len(stripped) <= 16):
-            return Reply("没看懂。发 /help 或点按钮。", help_keyboard())
+            return Reply(i18n.t("unknown.command"), help_keyboard())
         return Reply("")
     return as_reply(HANDLERS[cmd](args, flags))
 
@@ -750,6 +733,8 @@ def handle_callback(data: str) -> Reply:
         if not util.valid_node_name(util.normalize_node_name(target)):
             raise KeyError(target)
         return view_metric(kind, target)
+    if cmd == "lang":
+        return cmd_lang(args, {})
     if cmd == "bw":
         target = args[0] if args else ""
         if not target:
@@ -759,13 +744,17 @@ def handle_callback(data: str) -> Reply:
         if not util.valid_node_name(util.normalize_node_name(target)):
             raise KeyError(target)
         return cmd_bw([target], {})
-    return Reply("没看懂这个按钮。", help_keyboard())
+    return Reply(i18n.t("unknown.button"), help_keyboard())
 
 
 def register_bot(token: str) -> None:
     report.telegram_call(token, "deleteWebhook", {"drop_pending_updates": False}, timeout=15)
-    report.telegram_call(token, "setMyCommands", {"commands": COMMANDS, "language_code": "zh"}, timeout=15)
-    report.telegram_call(token, "setMyCommands", {"commands": COMMANDS}, timeout=15)
+    for code in i18n.LANGS:
+        cmds = [{"command": key, "description": i18n.t_lang(code, f"cmd.{key}")} for key in COMMAND_KEYS]
+        report.telegram_call(
+            token, "setMyCommands", {"commands": cmds, "language_code": code}, timeout=15
+        )
+    report.telegram_call(token, "setMyCommands", {"commands": bot_commands()}, timeout=15)
 
 
 def load_offset() -> int:
@@ -820,26 +809,26 @@ def _dispatch(text: str) -> Reply:
     try:
         return handle(text)
     except KeyError:
-        return Reply("没有这个节点。先点节点列表看覆盖范围。", home_keyboard())
+        return Reply(i18n.t("unknown.node"), home_keyboard())
     except ValueError as exc:
         if str(exc) == "PICK":
             return view_pick("go")
         return Reply(str(exc), help_keyboard())
     except Exception:
         traceback.print_exc()
-        return Reply("❌ 查询失败，请再点一次。", help_keyboard())
+        return Reply(i18n.t("query.fail"), help_keyboard())
 
 
 def _dispatch_callback(data: str) -> Reply:
     try:
         return handle_callback(data)
     except KeyError:
-        return Reply("没有这个节点。先点节点列表看覆盖范围。", home_keyboard())
+        return Reply(i18n.t("unknown.node"), home_keyboard())
     except ValueError as exc:
         return Reply(str(exc), help_keyboard())
     except Exception:
         traceback.print_exc()
-        return Reply("❌ 查询失败，请再点一次。", help_keyboard())
+        return Reply(i18n.t("query.fail"), help_keyboard())
 
 
 def main() -> int:
@@ -854,7 +843,7 @@ def main() -> int:
     state_path = util.state_dir() / "state.json"
     state = util.load_json(state_path)
     if not state.get("fleet_hello_sent"):
-        send_reply(token, chat_id, Reply(HELP + "\n\n机群版已启用，先点「机群总览」。", help_keyboard()))
+        send_reply(token, chat_id, Reply(i18n.t("help.body") + "\n\n" + i18n.t("hello.fleet"), help_keyboard()))
         state["fleet_hello_sent"] = True
         util.save_json(state_path, state)
     print(f"traffic-bot fleet hub={hub_base()}", flush=True)
@@ -872,7 +861,7 @@ def main() -> int:
                 qid = str(callback.get("id") or "")
                 now = time.monotonic()
                 if now - last_cmd < 0.35:
-                    answer_callback(token, qid, "稍等")
+                    answer_callback(token, qid, i18n.t("toast.wait"))
                     continue
                 last_cmd = now
                 data = str(callback.get("data") or "")
@@ -896,21 +885,21 @@ def main() -> int:
                         status = send_reply(
                             token,
                             chat_id,
-                            Reply("❌ 没有返回内容，请再点一次。", help_keyboard()),
+                            Reply(i18n.t("no_content"), help_keyboard()),
                             edit_message_id=edit_id,
                         )
                     t2 = time.monotonic()
-                    shown = reply.text or "❌ 没有返回内容"
+                    shown = reply.text or i18n.t("no_content")
                     print(f"cb {data} hub={t1-t0:.3f}s tg={t2-t1:.3f}s {status}", flush=True)
                     toast = toast_for_reply(shown, status)
                 except Exception:
                     traceback.print_exc()
-                    toast = "失败"
+                    toast = i18n.t("toast.failed")
                     try:
                         send_reply(
                             token,
                             chat_id,
-                            Reply("❌ 查询失败，请再点一次。", help_keyboard()),
+                            Reply(i18n.t("query.fail"), help_keyboard()),
                             edit_message_id=edit_id,
                         )
                     except Exception:

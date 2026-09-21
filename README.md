@@ -1,5 +1,7 @@
 # traffic-monitor
 
+English: [README.en.md](README.en.md)
+
 用 Telegram 看主机流量和基本状态。Python 3.9+ 标准库 + systemd，不需要 pip、额外 RPM 或 Docker。
 
 一个 Telegram bot token 同一时间只能有一个进程做 `getUpdates`。因此默认是一台 **hub** 收机器人消息，其他机器跑 **agent**，主动向 hub 上报。
@@ -11,7 +13,7 @@
 | `/etc/traffic-monitor.env`（权限 `0600`） | 每台服务器上的 token、节点名、额度、网卡 |
 | `deploy.local`（由 `deploy.local.example` 复制，已 gitignore） | 你本机 SSH 别名、可选的 hub 地址。尽量写 SSH alias，不要写公网 IP |
 
-点 bot 消息下面的按钮即可，不必手打节点名。
+点 bot 消息下面的按钮即可，不必手打节点名。点消息里的「中文」/「English」可切换 bot 语言；选择会写到 `/var/lib/traffic-monitor/ui.json`，优先于环境变量 `UI_LANG`。
 
 ## 流量怎么计
 
@@ -87,6 +89,7 @@ cp deploy.local.example deploy.local
 | `/cap 名字 500G` | 改额度 |
 | `/off` `/on` | 停用 / 重新启用（仍留在名单里） |
 | `/kick 名字` | 踢出，需再 `/add` 才会回来 |
+| 「中文」/「English」或 `/lang zh` `/lang en` | 切换 bot 语言 |
 
 「网速」看的是网卡正在走的流量；「测速」才会主动打流。两者不是一回事。
 
@@ -110,6 +113,7 @@ cp deploy.local.example deploy.local
 | `FLEET_HUB_URL` | Agent 连 hub（`https://...`） |
 | `FLEET_PUBLIC_URL` | 可选，给提示用的对外地址；不需要就留空 |
 | `HUB_CA` | 校验 hub 的证书，默认 `/var/lib/traffic-monitor/hub.crt` |
+| `UI_LANG` | bot 默认语言，`zh` 或 `en`。Telegram 按钮可覆盖，写入 `ui.json` |
 
 ## systemd 内存上限
 

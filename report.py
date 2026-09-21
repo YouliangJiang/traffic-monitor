@@ -18,6 +18,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import i18n
+
 UTC = timezone.utc
 THRESHOLDS = (50, 70, 85, 95, 100)
 PROJECTION_COOLDOWN = timedelta(hours=24)
@@ -146,19 +148,19 @@ def pre_traffic_table(snap: Snapshot, cap: int, include_today: bool = True) -> s
     if include_today:
         lines.extend(
             [
-                "今日",
-                f"  ↓ 入站  {fmt_gb(snap.today.rx)}",
-                f"  ↑ 出站  {fmt_gb(snap.today.tx)}",
-                f"  ∑ 合计  {fmt_gb(snap.today.total)}",
+                i18n.t("report.today"),
+                i18n.t("pre.row_in", label=i18n.t("report.in"), value=fmt_gb(snap.today.rx)),
+                i18n.t("pre.row_out", label=i18n.t("report.out"), value=fmt_gb(snap.today.tx)),
+                i18n.t("pre.row_total", label=i18n.t("report.total"), value=fmt_gb(snap.today.total)),
             ]
         )
     lines.extend(
         [
-            "本周期",
-            f"  ↓ 入站  {fmt_gb(snap.period_rx)}",
-            f"  ↑ 出站  {fmt_gb(snap.period_tx)}",
-            f"  ∑ 合计  {fmt_gb(used)}",
-            f"套餐额度  {fmt_gb_num(used)} / {cap_gb} GB  ({pct:.1f}%)",
+            i18n.t("report.period"),
+            i18n.t("pre.row_in", label=i18n.t("report.in"), value=fmt_gb(snap.period_rx)),
+            i18n.t("pre.row_out", label=i18n.t("report.out"), value=fmt_gb(snap.period_tx)),
+            i18n.t("pre.row_total", label=i18n.t("report.total"), value=fmt_gb(used)),
+            i18n.t("report.quota", used=fmt_gb_num(used), cap=cap_gb, pct=pct),
         ]
     )
     return "<pre>" + "\n".join(lines) + "</pre>"
@@ -394,22 +396,34 @@ def period_lines(snap: Snapshot, cap: int, include_today: bool = True) -> str:
     remaining = cap - used
     elapsed_days = max(1, (min(snap.now.date(), snap.period_end) - snap.period_start).days + 1)
     days_left = max(0, (snap.period_end - snap.now.date()).days)
-    xray = "healthy · :443 通" if snap.xray_ok else "异常 · :443 不通"
-    source = "本地账本 + 开机快照" if snap.bootstrap_applied else ("本地账本" if snap.vnstat_ok else "计数失败")
+    xray = i18n.t("report.xray_ok") if snap.xray_ok else i18n.t("report.xray_down")
+    if snap.bootstrap_applied:
+        source = i18n.t("report.src_boot")
+    elif snap.vnstat_ok:
+        source = i18n.t("report.src_ok")
+    else:
+        source = i18n.t("report.src_fail")
+    cap_note = i18n.t("report.over") if used >= cap else i18n.t("report.in_plan")
     return (
-        f"📅 账单周期：<code>{h(snap.period_start.isoformat())}</code> → "
-        f"<code>{h(snap.period_end.isoformat())}</code> (UTC)\n"
-        f"🖥 主机：<code>{h(host_label())}</code> · 网卡 <code>{h(snap.iface)}</code>\n"
-        f"📦 数据源：{h(source)}\n\n"
-        f"{pre_traffic_table(snap, cap, include_today=include_today)}\n"
-        f"{progress_bar(pct)} {pct:.1f}%\n\n"
-        f"📈 本周期日均 <b>{h(fmt_bytes(int(snap.rate_period)))}</b>/天"
-        f"（已过 {elapsed_days} 天，还剩 {days_left} 天）\n"
-        f"📉 近 3 日日均 <b>{h(fmt_bytes(int(snap.rate_recent)))}</b>/天\n"
-        f"🧮 按近 3 日估周期结束约 <b>{h(fmt_bytes(int(snap.projected)))}</b>\n"
-        f"⏳ 距 2 TB 还剩 <b>{h(fmt_bytes(remaining))}</b>\n"
-        f"{'⚠️ 已超过套餐额度，超出部分仅出站计费。' if used >= cap else '✅ 当前仍在套餐内。'}\n"
-        f"🔌 Xray：{h(xray)}"
+        i18n.t("report.cycle", start=h(snap.period_start.isoformat()), end=h(snap.period_end.isoformat()))
+        + "\n"
+        + i18n.t("report.host", host=h(host_label()), iface=h(snap.iface))
+        + "\n"
+        + i18n.t("report.source", source=h(source))
+        + "\n\n"
+        + f"{pre_traffic_table(snap, cap, include_today=include_today)}\n"
+        + f"{progress_bar(pct)} {pct:.1f}%\n\n"
+        + i18n.t("report.avg_period", rate=h(fmt_bytes(int(snap.rate_period))), elapsed=elapsed_days, left=days_left)
+        + "\n"
+        + i18n.t("report.avg_3d", rate=h(fmt_bytes(int(snap.rate_recent))))
+        + "\n"
+        + i18n.t("report.projected", value=h(fmt_bytes(int(snap.projected))))
+        + "\n"
+        + i18n.t("report.remain_cap", value=h(fmt_bytes(remaining)))
+        + "\n"
+        + cap_note
+        + "\n"
+        + i18n.t("report.xray", status=h(xray))
     )
 
 
@@ -502,7 +516,7 @@ def main() -> int:
             prev = previous_period_snapshot(iface, reset_day, bootstrap, str(old_key))
             if prev is not None:
                 msg = build_status_message(
-                    f"📦 <b>{h(host_label())} 流量 · 上期结算</b>",
+                    i18n.t("report.close", host=h(host_label())),
                     prev,
                     cap,
                     include_today=False,
@@ -520,26 +534,29 @@ def main() -> int:
     extra_bits: list[str] = []
     vnstat_note = ""
     if not snap.vnstat_ok:
-        vnstat_note = "⚠️ 流量账本读取失败，本周期数字可能不完整。"
+        vnstat_note = i18n.t("report.ledger_fail")
     boot_id = read_boot_id()
     if state.get("boot_id") and state["boot_id"] != boot_id:
-        extra_bits.append("♻️ 检测到主机重启，日账会从磁盘续计，不会从零开始。")
+        extra_bits.append(i18n.t("report.reboot"))
     state["boot_id"] = boot_id
 
     prev_marks = [int(x) for x in state.get("fired_thresholds") or []]
     newly = crossed_thresholds(prev_marks, pct)
     if newly:
-        marks = "、".join(f"{mark}%" for mark in newly)
-        extra_bits.append(f"🚨 本周期用量已跨过 <b>{h(marks)}</b>。")
+        marks = i18n.t("sep.list").join(f"{mark}%" for mark in newly)
+        extra_bits.append(i18n.t("report.crossed", marks=h(marks)))
         state["fired_thresholds"] = sorted(set(prev_marks + newly))
 
     last_proj = parse_iso_datetime(state.get("last_projection_sent_at"))
     if used < cap and projected > cap:
         if last_proj is None or snap.now - last_proj >= PROJECTION_COOLDOWN:
             extra_bits.append(
-                f"⚠️ 按近几日速率，周期结束可能到 <b>{h(fmt_bytes(int(projected)))}</b>，"
-                f"超过 2 TB。剩余 {days_left} 天建议日均不超过 "
-                f"<b>{h(fmt_bytes(int(max(0, cap - used) / max(1, days_left))))}</b>。"
+                i18n.t(
+                    "report.projection",
+                    projected=h(fmt_bytes(int(projected))),
+                    left=days_left,
+                    budget=h(fmt_bytes(int(max(0, cap - used) / max(1, days_left)))),
+                )
             )
             state["last_projection_sent_at"] = snap.now.isoformat()
 
@@ -551,16 +568,16 @@ def main() -> int:
 
     if not startup_sent or force:
         messages.append(
-            build_status_message(f"🚦 <b>{h(host_label())} 流量监控已上线</b>", snap, cap, extra)
+            build_status_message(i18n.t("report.startup", host=h(host_label())), snap, cap, extra)
         )
         state["startup_sent"] = True
         if snap.now.hour >= daily_hour:
             state["last_daily_sent"] = today_s
     elif daily_due:
-        messages.append(build_status_message(f"📊 <b>{h(host_label())} 流量日报</b>", snap, cap, extra))
+        messages.append(build_status_message(i18n.t("report.daily", host=h(host_label())), snap, cap, extra))
         state["last_daily_sent"] = today_s
     elif extra_bits:
-        messages.append(build_status_message(f"🚨 <b>{h(host_label())} 流量告警</b>", snap, cap, extra))
+        messages.append(build_status_message(i18n.t("report.alert", host=h(host_label())), snap, cap, extra))
 
     if dry_run:
         for msg in messages:

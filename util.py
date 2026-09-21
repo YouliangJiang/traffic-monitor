@@ -73,7 +73,8 @@ def parse_cap(text: str) -> Optional[int]:
         return None
     match = CAP_RE.match(raw)
     if not match:
-        raise ValueError(f"无法解析额度: {text}")
+        import i18n
+        raise ValueError(i18n.t("error.bad_cap", text=text))
     amount = float(match.group(1))
     unit = (match.group(2) or "g").lower()
     multipliers = {
@@ -91,13 +92,16 @@ def parse_cap(text: str) -> Optional[int]:
         "tib": 1024**4,
     }
     if unit not in multipliers:
-        raise ValueError(f"无法解析额度单位: {text}")
+        import i18n
+        raise ValueError(i18n.t("error.bad_cap_unit", text=text))
     return int(amount * multipliers[unit])
 
 
 def format_cap(cap: Optional[int]) -> str:
     if cap is None or cap <= 0:
-        return "无限"
+        import i18n
+
+        return i18n.t("cap.unlimited")
     from report import fmt_bytes
 
     return fmt_bytes(cap)
