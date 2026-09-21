@@ -2,7 +2,7 @@
 """Telegram HTML formatters for fleet and node views."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import hostinfo
 import report
@@ -69,7 +69,7 @@ def fleet_overview(rows: list[dict[str, Any]], title: str = "🖥 机群总览")
         f"{title}\n"
         f"在线 {online}/{len(rows)} · 有限额度合计 {cap_line} · 当前合计 {report.fmt_bytes(used_all)}\n\n"
         f"<pre>" + "\n".join(lines) + "</pre>\n\n"
-        f"查一台：<code>/go 名字</code>  测带宽：<code>/bw 名字</code>"
+        f"点下面的机器看详情，或点「刷新」。"
     )
 
 
@@ -85,7 +85,7 @@ def node_list(rows: list[dict[str, Any]]) -> str:
             f"{mark} <code>{report.h(row['name'])}</code>  {report.h(cap)}  "
             f"重置日 {int(row.get('reset_day') or 1)}{flag}"
         )
-    return "📋 <b>覆盖范围</b>\n\n" + "\n".join(lines)
+    return "📋 <b>覆盖范围</b>\n\n" + "\n".join(lines) + "\n\n点下面的机器看详情。"
 
 
 def node_detail(row: dict[str, Any]) -> str:
@@ -133,7 +133,8 @@ def node_detail(row: dict[str, Any]) -> str:
         f"MEM {hostinfo.fmt_mib(mem_used)}/{hostinfo.fmt_mib(mem_total)}  "
         f"DISK {report.fmt_bytes(int(snap.get('disk_used') or 0))}\n"
         f"NET ↓{hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}  "
-        f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}\n"
+        f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}"
+        f"{('  ' + str(int(round(float(snap.get('net_window_sec') or 0)))) + 's') if snap.get('net_window_sec') else ''}\n"
         f"XRAY {xray}  up {hostinfo.fmt_duration(float(snap.get('uptime_sec') or 0))}"
     )
 
@@ -173,11 +174,13 @@ def metric_block(row: dict[str, Any], kind: str) -> str:
             f"剩余 {report.fmt_bytes(int(snap.get('disk_avail') or 0))}"
         )
     if kind == "net":
+        window = float(snap.get("net_window_sec") or 0)
+        window_s = f"近 {window:.0f} 秒均值" if window >= 1 else "还没有足够采样窗口"
         return (
-            f"🌐 <b>{report.h(name)} · 瞬时网速</b>\n\n"
+            f"🌐 <b>{report.h(name)} · 网速</b>\n\n"
             f"↓ {hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}\n"
             f"↑ {hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}\n"
-            f"这是心跳时约 0.4 秒采样。要更准请用 <code>/bw {report.h(name)}</code>。"
+            f"{window_s}。点「网速」会再采 3 秒网卡；点「测速」才打流。"
         )
     if kind == "today":
         return (
@@ -204,18 +207,46 @@ def metric_block(row: dict[str, Any], kind: str) -> str:
     return node_detail(row)
 
 
-def bw_result(name: str, data: dict[str, Any]) -> str:
+def nic_result(name: str, data: dict[str, Any], row: Optional[dict[str, Any]] = None) -> str:
     seconds = float(data.get("seconds") or 0)
+    iface = str(data.get("iface") or (row or {}).get("iface") or "eth0")
+    snap = (row or {}).get("snapshot") or {}
+    window = float(snap.get("net_window_sec") or 0)
+    avg = ""
+    if window >= 1:
+        avg = (
+            f"\n近 {window:.0f} 秒均值  "
+            f"↓{hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}  "
+            f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}"
+        )
+    return (
+        f"🌐 <b>{report.h(name)} 当前网卡</b>  {seconds:.1f}s · <code>{report.h(iface)}</code>\n\n"
+        f"<pre>"
+        f"  ↓ 入  {hostinfo.fmt_bps(float(data.get('rx_bps') or 0)):>12}  {report.fmt_bytes(int(data.get('rx_bytes') or 0))}\n"
+        f"  ↑ 出  {hostinfo.fmt_bps(float(data.get('tx_bps') or 0)):>12}  {report.fmt_bytes(int(data.get('tx_bytes') or 0))}"
+        f"</pre>"
+        f"{avg}\n"
+        f"这是网卡正在走的流量，不是公网带宽。要测带宽请点「测速」。"
+    )
+
+
+def bw_result(name: str, data: dict[str, Any]) -> str:
     rx_bps = float(data.get("rx_bps") or 0)
     tx_bps = float(data.get("tx_bps") or 0)
+    down_sec = float(data.get("down_sec") or data.get("seconds") or 0)
+    up_sec = float(data.get("up_sec") or 0)
+    extra = ""
+    if data.get("up_error") or (tx_bps <= 0 and up_sec <= 0):
+        reason = data.get("up_error") or "上传超时"
+        extra = f"\n下载已出结果。上传失败，上行未计入：{report.h(reason)}"
     return (
-        f"📡 <b>{report.h(name)} 实时带宽</b>  {seconds:.1f}s\n\n"
+        f"📡 <b>{report.h(name)} 公网测速</b>\n\n"
         f"<pre>"
-        f"  ↓ 入  {hostinfo.fmt_bps(rx_bps):>12}  {report.fmt_bytes(int(data.get('rx_bytes') or 0))}\n"
-        f"  ↑ 出  {hostinfo.fmt_bps(tx_bps):>12}  {report.fmt_bytes(int(data.get('tx_bytes') or 0))}\n"
-        f"  ∑     {hostinfo.fmt_bps(rx_bps + tx_bps):>12}"
+        f"  ↓ 下载  {hostinfo.fmt_bps(rx_bps):>12}  {report.fmt_bytes(int(data.get('rx_bytes') or 0))} / {down_sec:.1f}s\n"
+        f"  ↑ 上传  {hostinfo.fmt_bps(tx_bps):>12}  {report.fmt_bytes(int(data.get('tx_bytes') or 0))} / {up_sec:.1f}s\n"
         f"</pre>\n"
-        f"被动采样网卡计数，不主动打流。"
+        f"对 Cloudflare 主动拉流/推流，测的是公网带宽，不是网卡空闲占用。"
+        f"{extra}"
     )
 
 

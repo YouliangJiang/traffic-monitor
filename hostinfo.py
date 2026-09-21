@@ -2,7 +2,10 @@
 """On-demand host snapshot. Stdlib only, cheap enough for a command reply."""
 from __future__ import annotations
 
+import http.client
 import os
+import socket
+import ssl
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -40,6 +43,7 @@ class HostInfo:
     disk_avail: int
     net_rx_bps: float
     net_tx_bps: float
+    net_window_sec: float
     uptime_sec: float
     xray_ok: bool
     xray_rss: int
@@ -94,7 +98,154 @@ def _read_net_bytes(iface: str) -> tuple[int, int]:
     return 0, 0
 
 
+_last_net: dict[str, tuple[float, int, int]] = {}
+
+
+def iface_bitrate(iface: str) -> tuple[float, float, float]:
+    """Bits/sec since the previous call for this iface. (rx, tx, window_sec)."""
+    rx, tx = _read_net_bytes(iface)
+    now = time.monotonic()
+    prev = _last_net.get(iface)
+    _last_net[iface] = (now, rx, tx)
+    if prev is None:
+        return 0.0, 0.0, 0.0
+    dt = now - prev[0]
+    if dt < 0.2:
+        return 0.0, 0.0, dt
+    return max(0, rx - prev[1]) * 8 / dt, max(0, tx - prev[2]) * 8 / dt, dt
+
+
+_CF_HOST = "speed.cloudflare.com"
+_CF_UA = {"User-Agent": "Mozilla/5.0"}
+_CF_DOWN = "/__down?bytes=50000000"
+_CF_CHUNK = 65536
+_cf_ssl = None
+
+
+def _cf_ctx() -> ssl.SSLContext:
+    global _cf_ssl
+    if _cf_ssl is None:
+        _cf_ssl = ssl.create_default_context()
+    return _cf_ssl
+
+
+def _cf_conn(timeout: float) -> http.client.HTTPSConnection:
+    return http.client.HTTPSConnection(_CF_HOST, timeout=timeout, context=_cf_ctx())
+
+
+def _cf_download(seconds: float) -> tuple[int, float]:
+    conn = _cf_conn(max(15.0, seconds + 10.0))
+    got = 0
+    t0 = None
+    try:
+        while True:
+            conn.request("GET", _CF_DOWN, headers=_CF_UA)
+            resp = conn.getresponse()
+            if resp.status != 200:
+                resp.read()
+                raise RuntimeError(f"download HTTP {resp.status}")
+            if conn.sock is not None:
+                conn.sock.settimeout(1.0)
+            while True:
+                try:
+                    chunk = resp.read(_CF_CHUNK)
+                except (TimeoutError, socket.timeout):
+                    if t0 is not None and time.monotonic() >= t0 + seconds:
+                        break
+                    continue
+                if not chunk:
+                    break
+                got += len(chunk)
+                if t0 is None:
+                    t0 = time.monotonic()
+                if time.monotonic() >= t0 + seconds:
+                    return got, max(0.001, time.monotonic() - t0)
+            if t0 is not None and time.monotonic() >= t0 + seconds:
+                break
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+    if t0 is None or got < 64_000:
+        raise RuntimeError("download too little data")
+    return got, max(0.001, time.monotonic() - t0)
+
+
+def _cf_upload(seconds: float) -> tuple[int, float]:
+    chunk = b"x" * _CF_CHUNK
+    hdr = f"{len(chunk):X}\r\n".encode("ascii")
+    conn = _cf_conn(20.0)
+    sent = 0
+    t0 = None
+    send_dt = 0.001
+    try:
+        conn.putrequest("POST", "/__up")
+        conn.putheader("User-Agent", "Mozilla/5.0")
+        conn.putheader("Content-Type", "application/octet-stream")
+        conn.putheader("Transfer-Encoding", "chunked")
+        conn.putheader("Host", _CF_HOST)
+        conn.endheaders()
+        if conn.sock is not None:
+            conn.sock.settimeout(2.0)
+        t0 = time.monotonic()
+        deadline = t0 + seconds
+        while time.monotonic() < deadline:
+            try:
+                conn.send(hdr + chunk + b"\r\n")
+            except (TimeoutError, socket.timeout, OSError) as exc:
+                if sent < 64_000:
+                    raise RuntimeError(f"上传发送超时：{exc}") from exc
+                break
+            sent += len(chunk)
+        send_dt = max(0.001, time.monotonic() - t0)
+        try:
+            conn.send(b"0\r\n\r\n")
+            if conn.sock is not None:
+                conn.sock.settimeout(2.0)
+            resp = conn.getresponse()
+            resp.read()
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+    if t0 is None:
+        raise RuntimeError("上传连接超时")
+    if sent < 64_000:
+        raise RuntimeError("上传超时，几乎没发出数据")
+    return sent, send_dt
+
+
 def sample_bandwidth(iface: str, seconds: float = 3.0) -> dict:
+    """Active public-internet speed test, not idle NIC occupancy."""
+    seconds = max(1.0, min(15.0, float(seconds)))
+    rx, dt_rx = _cf_download(seconds)
+    tx, dt_tx = 0, 0.0
+    up_error = ""
+    try:
+        tx, dt_tx = _cf_upload(min(seconds, 3.0))
+    except Exception as exc:
+        up_error = str(exc)
+    return {
+        "iface": iface,
+        "seconds": round(dt_rx + dt_tx, 3),
+        "down_sec": round(dt_rx, 3),
+        "up_sec": round(dt_tx, 3),
+        "rx_bytes": rx,
+        "tx_bytes": tx,
+        "rx_bps": rx * 8 / max(dt_rx, 0.001),
+        "tx_bps": (tx * 8 / dt_tx) if dt_tx else 0.0,
+        "target": "cloudflare",
+        "method": "speedtest",
+        "up_error": up_error,
+    }
+
+
+def sample_nic(iface: str, seconds: float = 3.0) -> dict:
+    """Passive NIC occupancy over a few seconds. No generated traffic."""
     seconds = max(1.0, min(15.0, float(seconds)))
     rx1, tx1 = _read_net_bytes(iface)
     t0 = time.monotonic()
@@ -110,6 +261,7 @@ def sample_bandwidth(iface: str, seconds: float = 3.0) -> dict:
         "tx_bytes": tx,
         "rx_bps": rx * 8 / dt,
         "tx_bps": tx * 8 / dt,
+        "method": "nic",
     }
 
 
@@ -172,20 +324,16 @@ def _pct(delta: int, total: int) -> float:
 
 def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
     cpu1 = _read_cpu_times()
-    net1 = _read_net_bytes(iface)
     procs1 = _proc_sample()
     time.sleep(interval)
     cpu2 = _read_cpu_times()
-    net2 = _read_net_bytes(iface)
     procs2 = _proc_sample()
+    rx_bps, tx_bps, net_window_sec = iface_bitrate(iface)
 
     cpu_total = cpu2[0] - cpu1[0]
     cpu_pct = 100.0 - _pct(cpu2[1] - cpu1[1], cpu_total)
     iowait_pct = _pct(cpu2[2] - cpu1[2], cpu_total)
     steal_pct = _pct(cpu2[3] - cpu1[3], cpu_total)
-    elapsed = max(interval, 0.01)
-    rx_bps = max(0, net2[0] - net1[0]) * 8 / elapsed
-    tx_bps = max(0, net2[1] - net1[1]) * 8 / elapsed
 
     cpu_rows: list[ProcUse] = []
     rss_rows: list[ProcUse] = []
@@ -228,6 +376,7 @@ def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
         disk_avail=disk_avail,
         net_rx_bps=rx_bps,
         net_tx_bps=tx_bps,
+        net_window_sec=net_window_sec,
         uptime_sec=_read_uptime(),
         xray_ok=tcp_443_open(),
         xray_rss=xray_rss,

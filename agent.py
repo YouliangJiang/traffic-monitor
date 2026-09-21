@@ -26,6 +26,10 @@ def execute_job(job: dict[str, Any], iface: str) -> dict[str, Any]:
             seconds = float((job.get("params") or {}).get("seconds") or 3)
             data = hostinfo.sample_bandwidth(iface, seconds)
             return {"id": job_id, "ok": True, "data": data}
+        if job.get("type") == "nic":
+            seconds = float((job.get("params") or {}).get("seconds") or 3)
+            data = hostinfo.sample_nic(iface, seconds)
+            return {"id": job_id, "ok": True, "data": data}
         return {"id": job_id, "ok": False, "error": f"unknown job {job.get('type')}"}
     except Exception as exc:
         return {"id": job_id, "ok": False, "error": str(exc)}

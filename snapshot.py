@@ -39,6 +39,7 @@ def build_snapshot(iface: str, reset_day: int) -> dict[str, Any]:
         "disk_avail": host.disk_avail,
         "net_rx_bps": host.net_rx_bps,
         "net_tx_bps": host.net_tx_bps,
+        "net_window_sec": host.net_window_sec,
         "uptime_sec": host.uptime_sec,
         "xray_ok": host.xray_ok,
         "xray_rss": host.xray_rss,

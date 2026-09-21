@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import html
+import http.client
 import json
 import os
 import resource
 import socket
+import ssl
 import sys
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -184,23 +187,77 @@ def host_label() -> str:
     return name or "host"
 
 
+_tg_lock = threading.Lock()
+_tg_conn: Optional[http.client.HTTPSConnection] = None
+_tg_ctx = ssl.create_default_context()
+
+
+def _tg_close() -> None:
+    global _tg_conn
+    conn = _tg_conn
+    _tg_conn = None
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
+def _tg_conn_get(timeout: int) -> http.client.HTTPSConnection:
+    global _tg_conn
+    conn = _tg_conn
+    if conn is None:
+        conn = http.client.HTTPSConnection(
+            "api.telegram.org",
+            timeout=timeout,
+            context=_tg_ctx,
+        )
+        _tg_conn = conn
+        return conn
+    conn.timeout = timeout
+    sock = conn.sock
+    if sock is not None:
+        sock.settimeout(timeout)
+    return conn
+
+
 def telegram_call(
     token: str,
     method: str,
     payload: Optional[dict[str, Any]] = None,
     timeout: int = 20,
 ) -> dict[str, Any]:
-    url = f"https://api.telegram.org/bot{token}/{method}"
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"} if data is not None else {}
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST" if data is not None else "GET",
-        headers=headers,
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
+    path = f"/bot{token}/{method}"
+    data = b"" if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
+    http_method = "POST" if payload is not None else "GET"
+    raw = ""
+    status = 0
+    last_exc: Optional[Exception] = None
+    for _attempt in range(2):
+        with _tg_lock:
+            try:
+                conn = _tg_conn_get(timeout)
+                conn.request(http_method, path, body=data or None, headers=headers)
+                resp = conn.getresponse()
+                status = int(resp.status)
+                raw = resp.read().decode("utf-8", errors="replace")
+                last_exc = None
+                break
+            except (OSError, http.client.HTTPException, TimeoutError) as exc:
+                last_exc = exc
+                _tg_close()
+    if last_exc is not None:
+        raise RuntimeError(f"telegram {method}: {last_exc}") from last_exc
+    if status >= 400:
+        try:
+            err = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            err = {}
+        desc = err.get("description") or raw or f"HTTP {status}"
+        raise RuntimeError(f"telegram {method} HTTP {status}: {desc}")
+    body = json.loads(raw) if raw else {}
     if not body.get("ok"):
         raise RuntimeError(body)
     return body
@@ -389,7 +446,7 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
         try:
             telegram_call(token, "sendMessage", payload, timeout=12)
             return
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+        except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
     raise SystemExit(f"telegram send failed: {last_error}")
 

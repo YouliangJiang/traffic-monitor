@@ -19,7 +19,11 @@ import snapshot
 import util
 
 STALE_AFTER = 90
-MAX_JOB_WAIT = 35
+MAX_JOB_WAIT = 50
+MAX_BODY = 262144
+JOB_KEEP_SEC = 120
+MAX_JOBS = 64
+MAX_WORKERS = 16
 
 
 class Hub:
@@ -73,7 +77,8 @@ class Hub:
     def upsert_from_agent(self, name: str, meta: dict[str, Any]) -> None:
         if name in self.kicked:
             raise PermissionError("kicked")
-        rec = self.nodes.get(name) or {
+        existing = self.nodes.get(name)
+        rec = dict(existing) if existing else {
             "cap_bytes": meta.get("cap_bytes"),
             "reset_day": meta.get("reset_day") or 1,
             "iface": meta.get("iface") or "eth0",
@@ -88,7 +93,8 @@ class Hub:
         if "cap_bytes" not in rec:
             rec["cap_bytes"] = meta.get("cap_bytes")
         self.nodes[name] = rec
-        self._save()
+        if rec != existing:
+            self._save()
 
     def add_node(self, name: str, cap: Optional[int], reset_day: int, iface: str, note: str = "") -> dict[str, Any]:
         name = util.normalize_node_name(name)
@@ -114,6 +120,13 @@ class Hub:
         name = util.normalize_node_name(name)
         self.nodes.pop(name, None)
         self.runtime.pop(name, None)
+        ev = self.events.pop(name, None)
+        if ev:
+            ev.set()
+        with self.lock:
+            drop = [jid for jid, job in self.jobs.items() if job.get("node") == name]
+            for jid in drop:
+                self.jobs.pop(jid, None)
         self.kicked.add(name)
         self._save()
 
@@ -159,7 +172,11 @@ class Hub:
             self.jobs[job_id] = job
             if name != self.local_name:
                 rt = self.runtime.setdefault(name, {})
-                rt.setdefault("pending", []).append(job_id)
+                pending = rt.setdefault("pending", [])
+                pending.append(job_id)
+                if len(pending) > 8:
+                    rt["pending"] = pending[-8:]
+            self._prune_jobs_locked()
         if name == self.local_name:
             threading.Thread(target=self._run_local_job, args=(job_id,), daemon=True).start()
         else:
@@ -200,6 +217,28 @@ class Hub:
             job = self.jobs.get(job_id)
             return dict(job) if job else None
 
+    def _prune_jobs_locked(self) -> None:
+        now = time.time()
+        drop = [
+            jid
+            for jid, job in self.jobs.items()
+            if now - float(job.get("created") or 0) > JOB_KEEP_SEC
+        ]
+        if not drop and len(self.jobs) <= MAX_JOBS:
+            return
+        if len(self.jobs) - len(drop) > MAX_JOBS:
+            extra = sorted(
+                (jid for jid in self.jobs if jid not in drop),
+                key=lambda jid: float((self.jobs[jid] or {}).get("created") or 0),
+            )
+            drop.extend(extra[: max(0, len(self.jobs) - len(drop) - MAX_JOBS)])
+        for jid in drop:
+            self.jobs.pop(jid, None)
+
+    def prune_jobs(self) -> None:
+        with self.lock:
+            self._prune_jobs_locked()
+
     def wait_job(self, job_id: str, timeout: float = MAX_JOB_WAIT) -> dict[str, Any]:
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -220,6 +259,10 @@ class Hub:
             if job["type"] == "bw":
                 seconds = float((job.get("params") or {}).get("seconds") or 3)
                 data = hostinfo.sample_bandwidth(iface, seconds)
+                self.finish_job(job_id, True, data)
+            elif job["type"] == "nic":
+                seconds = float((job.get("params") or {}).get("seconds") or 3)
+                data = hostinfo.sample_nic(iface, seconds)
                 self.finish_job(job_id, True, data)
             else:
                 self.finish_job(job_id, False, error=f"unknown job {job['type']}")
@@ -278,6 +321,7 @@ class Hub:
             try:
                 self.collect_local()
                 self.maybe_alerts()
+                self.prune_jobs()
             except Exception:
                 traceback.print_exc()
             time.sleep(20)
@@ -395,6 +439,13 @@ class HubHandler(BaseHTTPRequestHandler):
             self._send(401, {"ok": False, "error": "unauthorized"})
             return
         parsed = urlparse(self.path)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > MAX_BODY:
+            self._send(413, {"ok": False, "error": "payload too large"})
+            return
         body = self._read_json()
         if parsed.path == "/v1/sync":
             name = util.normalize_node_name(str(body.get("name") or ""))
@@ -491,6 +542,45 @@ class HubHandler(BaseHTTPRequestHandler):
 class HubServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 64
+
+    def __init__(self, server_address, RequestHandlerClass, ssl_ctx):
+        super().__init__(server_address, RequestHandlerClass)
+        self.ssl_ctx = ssl_ctx
+        self._workers = threading.BoundedSemaphore(MAX_WORKERS)
+
+    def process_request(self, request, client_address):
+        if not self._workers.acquire(blocking=False):
+            try:
+                request.close()
+            except Exception:
+                pass
+            return
+        thread = threading.Thread(
+            target=self._run_worker,
+            args=(request, client_address),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_worker(self, request, client_address):
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self._workers.release()
+
+    def process_request_thread(self, request, client_address):
+        try:
+            request.settimeout(8)
+            request = self.ssl_ctx.wrap_socket(request, server_side=True)
+            request.settimeout(45)
+        except Exception:
+            try:
+                request.close()
+            except Exception:
+                pass
+            return
+        super().process_request_thread(request, client_address)
 
 
 def serve() -> None:
@@ -501,8 +591,7 @@ def serve() -> None:
     port = util.env_int("HUB_PORT", 8788)
     import tlsutil
 
-    server = HubServer((bind, port), HubHandler)
-    server.socket = tlsutil.server_context().wrap_socket(server.socket, server_side=True)
+    server = HubServer((bind, port), HubHandler, tlsutil.server_context())
     print(f"traffic-hub listening https://{bind}:{port} local={HUB.local_name}", flush=True)
     server.serve_forever()
 

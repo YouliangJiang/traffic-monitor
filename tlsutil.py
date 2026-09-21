@@ -153,11 +153,20 @@ def shutil_which(name: str) -> Optional[str]:
     return which(name)
 
 
+_client_ctx: Optional[ssl.SSLContext] = None
+_client_ca = ""
+
+
 def client_context() -> ssl.SSLContext:
+    global _client_ctx, _client_ca
     ca = ca_path()
     if not ca.is_file():
         raise RuntimeError(f"missing hub TLS CA file: {ca}")
-    return ssl.create_default_context(cafile=str(ca))
+    key = str(ca)
+    if _client_ctx is None or _client_ca != key:
+        _client_ctx = ssl.create_default_context(cafile=key)
+        _client_ca = key
+    return _client_ctx
 
 
 def server_context() -> ssl.SSLContext:

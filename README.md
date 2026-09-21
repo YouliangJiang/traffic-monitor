@@ -11,6 +11,8 @@
 | `/etc/traffic-monitor.env`（权限 `0600`） | 每台服务器上的 token、节点名、额度、网卡 |
 | `deploy.local`（由 `deploy.local.example` 复制，已 gitignore） | 你本机 SSH 别名、可选的 hub 地址。尽量写 SSH alias，不要写公网 IP |
 
+点 bot 消息下面的按钮即可，不必手打节点名。
+
 ## 流量怎么计
 
 - 读内核 `/proc/net/dev` 指定网卡（默认 `eth0`）的收/发字节，入站和出站都记。
@@ -30,7 +32,7 @@
 
 **Agent**（更多机器）
 
-- `traffic-agent`：本机记账，出站连 hub
+- `traffic-agent`：本机记账，出站连 hub，并执行测速 / 网卡采样任务
 - 不必对公网再开业务端口
 
 不要在两台机器上同时跑 bot。
@@ -71,19 +73,22 @@ cp deploy.local.example deploy.local
 
 ## Telegram
 
-先在客户端向 bot 发一条消息，再把 `TELEGRAM_CHAT_ID` 配上。
+先在客户端向 bot 发一条消息，再把 `TELEGRAM_CHAT_ID` 配上。之后以消息下面的按钮为主。
 
-| 命令 | 作用 |
+| 命令 / 按钮 | 作用 |
 |---|---|
-| `/all` | 全部汇总 |
+| `/all` 或「机群总览」 | 全部汇总 |
 | `/nodes` | 覆盖列表 |
-| `/go 名字` | 一台详情 |
-| `/traffic` `/today` `/cpu` `/mem` `/disk` `/net` `/xray` `/uptime` | 可加名字或 `all` |
-| `/bw 名字 [秒]` | 被动采样网卡 1–15 秒，**不主动打流** |
+| `/go 名字` 或点机器名 | 一台详情 |
+| `/traffic` `/today` `/cpu` `/mem` `/disk` `/xray` `/uptime` | 可加名字或 `all` |
+| 「网速」或 `/net 名字` | 读网卡当前吞吐约 3 秒，**不打流** |
+| 「测速」或 `/bw 名字 [秒]` | 对 Cloudflare 下载/上传，测公网带宽 |
 | `/add 名字 cap=2T reset=27` | 纳入覆盖 |
 | `/cap 名字 500G` | 改额度 |
 | `/off` `/on` | 停用 / 重新启用（仍留在名单里） |
 | `/kick 名字` | 踢出，需再 `/add` 才会回来 |
+
+「网速」看的是网卡正在走的流量；「测速」才会主动打流。两者不是一回事。
 
 ## `/etc/traffic-monitor.env`
 
@@ -110,9 +115,9 @@ cp deploy.local.example deploy.local
 
 | unit | MemoryMax | 说明 |
 |---|---|---|
-| `traffic-hub` | 80M | 仅 hub |
+| `traffic-hub` | 96M | 仅 hub |
 | `traffic-bot` | 56M | 仅 hub |
-| `traffic-agent` | 56M | 仅 agent |
+| `traffic-agent` | 96M | 仅 agent |
 | `traffic-monitor.timer` | 48M oneshot | 日报 |
 
 状态目录：`/var/lib/traffic-monitor`。代码安装到 `/opt/traffic-monitor`。
