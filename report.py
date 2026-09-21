@@ -381,7 +381,7 @@ def collect_snapshot(
         period_rx=rx,
         period_tx=tx,
         vnstat_ok=traffic_ok,
-        xray_ok=tcp_443_open(),
+        xray_ok=False,
         bootstrap_applied=applied,
         days=days,
         rate_period=rate_period,
@@ -390,13 +390,22 @@ def collect_snapshot(
     )
 
 
+
+def _local_svc_specs() -> list:
+    import util
+
+    inv = load_json(state_dir() / "inventory.json")
+    node = util.normalize_node_name(os.environ.get("NODE_NAME") or "")
+    rec = (inv.get("nodes") or {}).get(node) or {}
+    return util.normalize_svc_list(rec.get("svc"))
+
+
 def period_lines(snap: Snapshot, cap: int, include_today: bool = True) -> str:
     used = snap.period_rx + snap.period_tx
     pct = (used / cap * 100.0) if cap else 0.0
     remaining = cap - used
     elapsed_days = max(1, (min(snap.now.date(), snap.period_end) - snap.period_start).days + 1)
     days_left = max(0, (snap.period_end - snap.now.date()).days)
-    xray = i18n.t("report.xray_ok") if snap.xray_ok else i18n.t("report.xray_down")
     if snap.bootstrap_applied:
         source = i18n.t("report.src_boot")
     elif snap.vnstat_ok:
@@ -404,7 +413,7 @@ def period_lines(snap: Snapshot, cap: int, include_today: bool = True) -> str:
     else:
         source = i18n.t("report.src_fail")
     cap_note = i18n.t("report.over") if used >= cap else i18n.t("report.in_plan")
-    return (
+    body = (
         i18n.t("report.cycle", start=h(snap.period_start.isoformat()), end=h(snap.period_end.isoformat()))
         + "\n"
         + i18n.t("report.host", host=h(host_label()), iface=h(snap.iface))
@@ -423,8 +432,21 @@ def period_lines(snap: Snapshot, cap: int, include_today: bool = True) -> str:
         + "\n"
         + cap_note
         + "\n"
-        + i18n.t("report.xray", status=h(xray))
     )
+    specs = _local_svc_specs()
+    if specs:
+        import hostinfo
+
+        results = hostinfo.probe_services(specs)
+        bits = []
+        for item in results:
+            ports = " ".join(
+                ("✅" if p.get("ok") else "❌") + str(p.get("port")) for p in (item.get("ports") or [])
+            )
+            bits.append(f"{item.get('name')} {ports}")
+        if bits:
+            body += "\n" + i18n.t("report.svc", detail=" · ".join(bits))
+    return body
 
 
 def build_status_message(

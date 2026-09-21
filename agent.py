@@ -2,7 +2,6 @@
 """Agent: push snapshots to hub and run jobs (bandwidth tests)."""
 from __future__ import annotations
 
-import os
 import time
 import traceback
 from typing import Any
@@ -45,10 +44,11 @@ def main() -> None:
     reset_day = util.env_int("BILLING_RESET_DAY", 1)
     cap = _cap()
     pending_result: dict[str, Any] | None = None
+    watch: list[dict[str, Any]] = []
     print(f"traffic-agent node={name} hub={hub_url}", flush=True)
     while True:
         try:
-            snap = snapshot.build_snapshot(iface, reset_day)
+            snap = snapshot.build_snapshot(iface, reset_day, watch)
             payload = {
                 "name": name,
                 "iface": iface,
@@ -61,6 +61,7 @@ def main() -> None:
                 payload["job_result"] = pending_result
             body = util.http_json("POST", f"{hub_url}/v1/sync", token, payload, timeout=40)
             pending_result = None
+            watch = util.normalize_svc_list(body.get("svc"))
             jobs = body.get("jobs") or []
             for job in jobs:
                 pending_result = execute_job(job, iface)

@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 NODE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+MAX_SVC = 4
+MAX_SVC_PORTS = 8
 CAP_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmgt]i?b?)?$", re.I)
 
 
@@ -105,6 +107,71 @@ def format_cap(cap: Optional[int]) -> str:
     from report import fmt_bytes
 
     return fmt_bytes(cap)
+
+
+def parse_svc_name(text: str) -> str:
+    name = normalize_node_name(text)
+    if not valid_node_name(name):
+        import i18n
+
+        raise ValueError(i18n.t("error.bad_svc", text=text))
+    return name
+
+
+def parse_ports(text: str) -> list[int]:
+    raw = (text or "").replace("，", ",").replace(";", ",")
+    ports: list[int] = []
+    for part in raw.replace(" ", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            port = int(part)
+        except ValueError:
+            import i18n
+
+            raise ValueError(i18n.t("error.bad_ports", text=text)) from None
+        if port < 1 or port > 65535:
+            import i18n
+
+            raise ValueError(i18n.t("error.bad_ports", text=text))
+        if port not in ports:
+            ports.append(port)
+    if not ports or len(ports) > MAX_SVC_PORTS:
+        import i18n
+
+        raise ValueError(i18n.t("error.bad_ports", text=text))
+    return ports
+
+
+def normalize_svc_list(raw: Any) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            name = parse_svc_name(str(item.get("name") or ""))
+            ports = [int(p) for p in (item.get("ports") or [])]
+            ports = parse_ports(",".join(str(p) for p in ports))
+        except (ValueError, TypeError):
+            continue
+        proc = normalize_node_name(str(item.get("proc") or name))
+        if not valid_node_name(proc):
+            proc = name
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({"name": name, "ports": ports, "proc": proc})
+        if len(out) >= MAX_SVC:
+            break
+    return out
 
 
 def cap_pct(used: int, cap: Optional[int]) -> Optional[float]:

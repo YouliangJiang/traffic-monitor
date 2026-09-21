@@ -10,8 +10,9 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Optional
 
-from report import fmt_bytes, h, host_label, progress_bar, tcp_443_open, utcnow
+from report import fmt_bytes, h, host_label, progress_bar, utcnow
 
 import i18n
 
@@ -324,6 +325,46 @@ def _pct(delta: int, total: int) -> float:
     return max(0.0, min(100.0, 100.0 * delta / total))
 
 
+
+def tcp_port_open(port: int, timeout: float = 0.4) -> bool:
+    port = int(port)
+    for host in ("127.0.0.1", "::1"):
+        try:
+            with socket.create_connection((host, port), timeout):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def proc_rss_by_comm(comm: str) -> int:
+    want = (comm or "").strip()[:18]
+    if not want:
+        return 0
+    total = 0
+    for _pid, (name, rss, _cpu) in _proc_sample().items():
+        if name == want:
+            total += rss
+    return total
+
+
+def probe_services(specs: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for spec in specs or []:
+        ports = []
+        all_ok = True
+        for port in spec.get("ports") or []:
+            ok = tcp_port_open(int(port))
+            ports.append({"port": int(port), "ok": ok})
+            if not ok:
+                all_ok = False
+        if not ports:
+            all_ok = False
+        rss = proc_rss_by_comm(str(spec.get("proc") or spec.get("name") or ""))
+        out.append({"name": spec.get("name"), "ports": ports, "ok": all_ok, "rss": rss})
+    return out
+
+
 def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
     cpu1 = _read_cpu_times()
     procs1 = _proc_sample()
@@ -380,7 +421,7 @@ def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
         net_tx_bps=tx_bps,
         net_window_sec=net_window_sec,
         uptime_sec=_read_uptime(),
-        xray_ok=tcp_443_open(),
+        xray_ok=bool(xray_rss),
         xray_rss=xray_rss,
         top_rss=rss_rows[:5],
         top_cpu=cpu_rows[:5],

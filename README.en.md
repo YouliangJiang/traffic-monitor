@@ -12,6 +12,7 @@ Keep machine-specific values out of git:
 |---|---|
 | `/etc/traffic-monitor.env` (mode `0600`) | Tokens, node name, cap, NIC on each host |
 | `deploy.local` (copy from `deploy.local.example`, gitignored) | SSH aliases and optional hub URL on the machine you deploy from. Prefer SSH aliases, not public IPs |
+| `/var/lib/traffic-monitor/inventory.json` | Node caps and optional service watches. Lives on the hub only; do not commit |
 
 Tap the buttons under bot messages. You do not need to type node names.
 
@@ -84,7 +85,9 @@ Send the bot a message first, then set `TELEGRAM_CHAT_ID`. After that, prefer th
 | `/all` or Overview | Fleet summary |
 | `/nodes` | Coverage list |
 | `/go name` or tap a machine | One node |
-| `/traffic` `/today` `/cpu` `/mem` `/disk` `/xray` `/uptime` | Optional name or `all` |
+| `/traffic` `/today` `/cpu` `/mem` `/disk` `/uptime` | Optional name or `all` |
+| `/svc name xray 443,2053` | Optional: probe those TCP ports on the node; hidden if unset |
+| `/svc name xray off` | Remove that service |
 | NIC or `/net name` | Sample current NIC occupancy for ~3s, **no generated traffic** |
 | Speed test or `/bw name [seconds]` | Download/upload via Cloudflare (public bandwidth) |
 | `/add name cap=2T reset=27` | Add to coverage |
@@ -94,6 +97,27 @@ Send the bot a message first, then set `TELEGRAM_CHAT_ID`. After that, prefer th
 | 中文 / English or `/lang zh` `/lang en` | Switch bot language |
 
 NIC occupancy is traffic currently on the card. Speed test generates traffic on purpose. They are not the same.
+
+## Optional service watches
+
+This is optional. **No button appears until you configure it.** Xray, Nginx, or anything else is just a name plus TCP ports probed on that host.
+
+Configure from Telegram (stored in the hub `inventory.json`, not git):
+
+```
+/svc NODE xray 443,2053
+/svc NODE nginx 80,443 proc=nginx
+/svc NODE xray off
+/svc NODE off
+```
+
+- `NODE` is the node name. Service names are yours: lowercase letters, digits, hyphens.
+- Ports are arbitrary, comma-separated. Probes use `127.0.0.1` / `::1` on the target, so localhost-only inbounds work.
+- `proc=` is optional (RSS). Defaults to the service name.
+- At most 4 services per node. Add another with a second `/svc` line.
+
+`/xray` still works: it opens the service named `xray` if present, otherwise the first configured service.
+
 
 User-facing strings live in `locales/zh.json` and `locales/en.json`. Code only formats those keys.
 

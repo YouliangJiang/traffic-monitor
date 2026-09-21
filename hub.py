@@ -141,6 +141,35 @@ class Hub:
         rec["cap_bytes"] = cap
         self._save()
 
+    def svc_specs(self, name: str) -> list[dict[str, Any]]:
+        rec = self.nodes.get(util.normalize_node_name(name)) or {}
+        return util.normalize_svc_list(rec.get("svc"))
+
+    def set_svc(self, name: str, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rec = self._require(name)
+        rec["svc"] = util.normalize_svc_list(specs)
+        self._save()
+        return rec["svc"]
+
+    def upsert_svc(self, name: str, spec: dict[str, Any]) -> list[dict[str, Any]]:
+        specs = [dict(item) for item in self.svc_specs(name)]
+        spec = util.normalize_svc_list([spec])
+        if not spec:
+            raise ValueError(i18n.t("error.bad_svc", text=""))
+        spec = spec[0]
+        specs = [item for item in specs if item.get("name") != spec["name"]]
+        specs.append(spec)
+        if len(specs) > util.MAX_SVC:
+            raise ValueError(i18n.t("error.too_many_svc"))
+        return self.set_svc(name, specs)
+
+    def remove_svc(self, name: str, svc_name: str = "") -> list[dict[str, Any]]:
+        if not svc_name:
+            return self.set_svc(name, [])
+        svc_name = util.parse_svc_name(svc_name)
+        specs = [item for item in self.svc_specs(name) if item.get("name") != svc_name]
+        return self.set_svc(name, specs)
+
     def _require(self, name: str) -> dict[str, Any]:
         name = util.normalize_node_name(name)
         rec = self.nodes.get(name)
@@ -274,7 +303,8 @@ class Hub:
         rec = self.nodes.get(self.local_name) or {}
         iface = rec.get("iface") or self.iface
         reset_day = int(rec.get("reset_day") or self.reset_day)
-        snap = snapshot.build_snapshot(iface, reset_day)
+        specs = util.normalize_svc_list(rec.get("svc"))
+        snap = snapshot.build_snapshot(iface, reset_day, specs)
         snap["name"] = self.local_name
         self.put_snapshot(self.local_name, snap)
 
@@ -341,6 +371,10 @@ class Hub:
             online = (name == self.local_name) or (last_seen and now - last_seen <= STALE_AFTER)
             cap = rec.get("cap_bytes")
             used = int(snap.get("period_total") or 0)
+            specs = util.normalize_svc_list(rec.get("svc"))
+            if name == self.local_name and specs:
+                snap = dict(snap)
+                snap["svc"] = hostinfo.probe_services(specs)
             rows.append(
                 {
                     "name": name,
@@ -350,6 +384,7 @@ class Hub:
                     "reset_day": rec.get("reset_day") or 1,
                     "iface": rec.get("iface") or "eth0",
                     "note": rec.get("note") or "",
+                    "svc": specs,
                     "online": bool(online),
                     "last_seen": last_seen,
                     "age": (now - last_seen) if last_seen else None,
@@ -487,7 +522,7 @@ class HubHandler(BaseHTTPRequestHandler):
             if wait and not (HUB.runtime.get(name) or {}).get("pending"):
                 HUB.event_for(name).wait(timeout=wait)
             jobs = HUB.pop_jobs(name)
-            self._send(200, {"ok": True, "jobs": jobs})
+            self._send(200, {"ok": True, "jobs": jobs, "svc": HUB.svc_specs(name)})
             return
         if parsed.path == "/v1/jobs":
             name = str(body.get("node") or "")
@@ -530,6 +565,20 @@ class HubHandler(BaseHTTPRequestHandler):
                 if action == "cap":
                     HUB.set_cap(name, body.get("cap_bytes"))
                     self._send(200, {"ok": True})
+                    return
+                if action == "svc":
+                    if body.get("clear"):
+                        specs = HUB.remove_svc(name, str(body.get("svc_name") or ""))
+                    else:
+                        specs = HUB.upsert_svc(
+                            name,
+                            {
+                                "name": body.get("svc_name") or body.get("svc"),
+                                "ports": body.get("ports"),
+                                "proc": body.get("proc"),
+                            },
+                        )
+                    self._send(200, {"ok": True, "svc": specs})
                     return
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})

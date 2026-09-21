@@ -96,6 +96,76 @@ def node_list(rows: list[dict[str, Any]]) -> str:
     return f"{i18n.t('fleet.coverage_title')}\n\n" + "\n".join(lines) + "\n\n" + i18n.t("fleet.coverage_hint")
 
 
+
+def _svc_specs(row: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(row.get("svc") or [])
+
+
+def _svc_result(row: dict[str, Any], name: str) -> dict[str, Any]:
+    snap = row.get("snapshot") or {}
+    for item in snap.get("svc") or []:
+        if item.get("name") == name:
+            return item
+    return {}
+
+
+def svc_line(row: dict[str, Any]) -> str:
+    specs = _svc_specs(row)
+    if not specs:
+        return ""
+    bits = []
+    for spec in specs:
+        name = spec.get("name") or ""
+        got = _svc_result(row, name)
+        ports = got.get("ports") or [{"port": p, "ok": None} for p in spec.get("ports") or []]
+        marks = []
+        for item in ports:
+            ok = item.get("ok")
+            mark = "✅" if ok else ("…" if ok is None else "❌")
+            marks.append(f"{mark}{item.get('port')}")
+        bits.append(f"{name} " + " ".join(marks))
+    return "SVC " + " · ".join(bits)
+
+
+def svc_block(row: dict[str, Any], svc_name: str) -> str:
+    specs = [s for s in _svc_specs(row) if s.get("name") == svc_name]
+    if not specs:
+        return i18n.t("svc.not_on_node", name=report.h(row.get("name") or ""), svc=report.h(svc_name))
+    spec = specs[0]
+    got = _svc_result(row, svc_name)
+    ports = got.get("ports") or [{"port": p, "ok": None} for p in spec.get("ports") or []]
+    lines = []
+    for item in ports:
+        ok = item.get("ok")
+        if ok is True:
+            lines.append(i18n.t("svc.port_ok", port=item.get("port")))
+        elif ok is False:
+            lines.append(i18n.t("svc.port_down", port=item.get("port")))
+        else:
+            lines.append(i18n.t("svc.port_wait", port=item.get("port")))
+    rss = int(got.get("rss") or 0)
+    rss_s = hostinfo.fmt_mib(rss) if rss else i18n.t("host.no_proc")
+    overall = i18n.t("svc.ok") if got.get("ok") else i18n.t("svc.down")
+    if got.get("ok") is None and not got:
+        overall = i18n.t("svc.wait")
+    return i18n.t(
+        "svc.block",
+        name=report.h(row.get("name") or ""),
+        svc=report.h(svc_name),
+        status=overall,
+        ports="\n".join(lines),
+        rss=rss_s,
+        proc=report.h(spec.get("proc") or svc_name),
+    )
+
+
+def first_svc_name(row: dict[str, Any], prefer: str = "xray") -> str:
+    specs = _svc_specs(row)
+    names = [str(s.get("name") or "") for s in specs if s.get("name")]
+    if prefer in names:
+        return prefer
+    return names[0] if names else ""
+
 def node_detail(row: dict[str, Any]) -> str:
     snap = row.get("snapshot") or {}
     if not snap:
@@ -133,10 +203,11 @@ def node_detail(row: dict[str, Any]) -> str:
         cap_note = i18n.t("node.unlimited_note")
     mem_used = int(snap.get("mem_total") or 0) - int(snap.get("mem_available") or 0)
     mem_total = int(snap.get("mem_total") or 0)
-    xray = "healthy" if snap.get("xray_ok") else "down"
     net_extra = ""
     if snap.get("net_window_sec"):
         net_extra = "  " + str(int(round(float(snap.get("net_window_sec") or 0)))) + "s"
+    extra_svc = svc_line(row)
+    extra_svc = ("\n" + extra_svc) if extra_svc else ""
     return (
         i18n.t("node.header", name=report.h(row["name"]), status=_status(row)) + "\n"
         + i18n.t(
@@ -159,7 +230,8 @@ def node_detail(row: dict[str, Any]) -> str:
         + f"NET ↓{hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}  "
         + f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}"
         + f"{net_extra}\n"
-        + f"XRAY {xray}  up {hostinfo.fmt_duration(float(snap.get('uptime_sec') or 0))}"
+        + f"up {hostinfo.fmt_duration(float(snap.get('uptime_sec') or 0))}"
+        + extra_svc
     )
 
 
@@ -225,13 +297,10 @@ def metric_block(row: dict[str, Any], kind: str) -> str:
             total=report.fmt_gb(int(snap.get("today_total") or 0)),
         )
     if kind == "xray":
-        ok = bool(snap.get("xray_ok"))
-        return i18n.t(
-            "metric.xray",
-            name=report.h(name),
-            status=i18n.t("metric.xray_ok") if ok else i18n.t("metric.xray_down"),
-            rss=hostinfo.fmt_mib(int(snap.get("xray_rss") or 0)),
-        )
+        svc_name = first_svc_name(row)
+        if not svc_name:
+            return i18n.t("svc.not_configured", name=report.h(name))
+        return svc_block(row, svc_name)
     if kind == "uptime":
         return i18n.t(
             "metric.uptime",

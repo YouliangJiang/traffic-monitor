@@ -12,8 +12,11 @@ English: [README.en.md](README.en.md)
 |---|---|
 | `/etc/traffic-monitor.env`（权限 `0600`） | 每台服务器上的 token、节点名、额度、网卡 |
 | `deploy.local`（由 `deploy.local.example` 复制，已 gitignore） | 你本机 SSH 别名、可选的 hub 地址。尽量写 SSH alias，不要写公网 IP |
+| `/var/lib/traffic-monitor/inventory.json` | 节点额度、可选服务探活。只存在 hub 本机，不要提交 |
 
-点 bot 消息下面的按钮即可，不必手打节点名。点消息里的「中文」/「English」可切换 bot 语言；选择会写到 `/var/lib/traffic-monitor/ui.json`，优先于环境变量 `UI_LANG`。
+点 bot 消息下面的按钮即可，不必手打节点名。
+点消息里的「中文」/「English」可切换 bot 语言；选择会写到 `/var/lib/traffic-monitor/ui.json`，优先于环境变量 `UI_LANG`。
+
 
 ## 流量怎么计
 
@@ -82,7 +85,9 @@ cp deploy.local.example deploy.local
 | `/all` 或「机群总览」 | 全部汇总 |
 | `/nodes` | 覆盖列表 |
 | `/go 名字` 或点机器名 | 一台详情 |
-| `/traffic` `/today` `/cpu` `/mem` `/disk` `/xray` `/uptime` | 可加名字或 `all` |
+| `/traffic` `/today` `/cpu` `/mem` `/disk` `/uptime` | 可加名字或 `all` |
+| `/svc 名字 xray 443,2053` | 可选：在该机探测这些 TCP 端口；不配则详情里不显示 |
+| `/svc 名字 xray off` | 去掉该服务 |
 | 「网速」或 `/net 名字` | 读网卡当前吞吐约 3 秒，**不打流** |
 | 「测速」或 `/bw 名字 [秒]` | 对 Cloudflare 下载/上传，测公网带宽 |
 | `/add 名字 cap=2T reset=27` | 纳入覆盖 |
@@ -92,6 +97,27 @@ cp deploy.local.example deploy.local
 | 「中文」/「English」或 `/lang zh` `/lang en` | 切换 bot 语言 |
 
 「网速」看的是网卡正在走的流量；「测速」才会主动打流。两者不是一回事。
+
+## 可选服务探活
+
+这是扩展项，**不配就不显示按钮**。Xray、Nginx 或别的进程都可以，只是「在那台机器上探测一组 TCP 端口是否在听」。
+
+用 Telegram 配（写进 hub 的 `inventory.json`，不进 git）：
+
+```
+/svc NODE xray 443,2053
+/svc NODE nginx 80,443 proc=nginx
+/svc NODE xray off
+/svc NODE off
+```
+
+- `NODE` 是节点名；服务名自定，小写字母、数字、短横线。
+- 端口任意，逗号分隔。探测的是目标机本机 `127.0.0.1` / `::1`，所以只绑在 localhost 的 inbound 也能盯。
+- `proc=` 可选，用来读进程 RSS；省略则默认等于服务名。
+- 每台最多 4 个服务。再加一种服务再发一条 `/svc` 即可。
+
+`/xray` 仍可用：若该机配过名为 `xray` 的服务就看它，否则看第一个已配服务。
+
 
 ## `/etc/traffic-monitor.env`
 

@@ -26,6 +26,7 @@ COMMAND_KEYS = [
     "net",
     "bw",
     "xray",
+    "svc",
     "uptime",
     "add",
     "cap",
@@ -56,6 +57,8 @@ ALIASES = {
     "/bw": "bw",
     "/speed": "bw",
     "/xray": "xray",
+    "/svc": "svc",
+    "/service": "svc",
     "/uptime": "uptime",
     "/add": "add",
     "/cap": "cap",
@@ -196,16 +199,27 @@ def pick_keyboard(action: str, rows: Optional[list[dict[str, Any]]] = None) -> d
     return _markup(keyboard)
 
 
-def node_keyboard(name: str) -> dict[str, Any]:
+def node_keyboard(name: str, row: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     name = util.normalize_node_name(name)
-    return _markup(
-        [
-            [_btn(i18n.t("btn.today"), f"m:today:{name}"), _btn(i18n.t("btn.cpu"), f"m:cpu:{name}"), _btn(i18n.t("btn.mem"), f"m:mem:{name}")],
-            [_btn(i18n.t("btn.disk"), f"m:disk:{name}"), _btn(i18n.t("btn.net"), f"m:net:{name}"), _btn(i18n.t("btn.xray"), f"m:xray:{name}")],
-            [_btn(i18n.t("btn.uptime"), f"m:uptime:{name}"), _btn(i18n.t("btn.speedtest"), f"bw:{name}")],
-            [_btn(i18n.t("btn.back"), "home"), _btn(i18n.t("btn.refresh"), f"go:{name}")],
-        ]
-    )
+    if row is None:
+        try:
+            row = node_named(name)
+        except Exception:
+            row = {}
+    rows: list[list[dict[str, str]]] = [
+        [_btn(i18n.t("btn.today"), f"m:today:{name}"), _btn(i18n.t("btn.cpu"), f"m:cpu:{name}"), _btn(i18n.t("btn.mem"), f"m:mem:{name}")],
+        [_btn(i18n.t("btn.disk"), f"m:disk:{name}"), _btn(i18n.t("btn.net"), f"m:net:{name}")],
+    ]
+    svc_btns = [
+        _btn(str(spec.get("name") or "svc"), f"s:{name}:{spec.get('name')}")
+        for spec in (row.get("svc") or [])
+        if spec.get("name")
+    ]
+    for i in range(0, len(svc_btns), 3):
+        rows.append(svc_btns[i : i + 3])
+    rows.append([_btn(i18n.t("btn.uptime"), f"m:uptime:{name}"), _btn(i18n.t("btn.speedtest"), f"bw:{name}")])
+    rows.append([_btn(i18n.t("btn.back"), "home"), _btn(i18n.t("btn.refresh"), f"go:{name}")])
+    return _markup(rows)
 
 
 def as_reply(value: Any) -> Reply:
@@ -259,6 +273,10 @@ def parse_callback(data: str) -> tuple[str, list[str]]:
         return "bw", [raw.split(":", 1)[1]]
     if raw.startswith("lang:"):
         return "lang", [raw.split(":", 1)[1]]
+    if raw.startswith("s:"):
+        parts = raw.split(":")
+        if len(parts) >= 3:
+            return "svcview", [parts[1], parts[2]]
     if raw.startswith("m:"):
         parts = raw.split(":")
         if len(parts) >= 3 and parts[1] in METRIC_KINDS:
@@ -295,6 +313,10 @@ def loading_text(data: str) -> str:
         target = args[1] if len(args) > 1 else ""
         extra = i18n.t("loading.metric_extra", name=report.h(target)) if target and target != "all" else ""
         return i18n.t("loading.metric", label=report.h(label), extra=extra)
+    if cmd == "svcview":
+        label = report.h(args[1]) if len(args) > 1 else "svc"
+        extra = i18n.t("loading.metric_extra", name=report.h(args[0])) if args else ""
+        return i18n.t("loading.metric", label=label, extra=extra)
     labels = {
         "home": i18n.t("loading.home"),
         "nodes": i18n.t("loading.nodes"),
@@ -396,7 +418,8 @@ def view_help() -> Reply:
 
 def view_go(name: str) -> Reply:
     name = util.normalize_node_name(name)
-    return Reply(formatters.node_detail(node_named(name)), node_keyboard(name))
+    row = node_named(name)
+    return Reply(formatters.node_detail(row), node_keyboard(name, row))
 
 
 def view_metric(kind: str, target: str) -> Reply:
@@ -412,7 +435,8 @@ def view_metric(kind: str, target: str) -> Reply:
     name = util.normalize_node_name(target)
     if kind == "traffic":
         return view_go(name)
-    return Reply(formatters.metric_block(node_named(name), kind), node_keyboard(name))
+    row = node_named(name)
+    return Reply(formatters.metric_block(row, kind), node_keyboard(name, row))
 
 
 def view_pick(kind_or_bw: str) -> Reply:
@@ -666,6 +690,63 @@ def cmd_off(args: list[str], _: dict[str, str]) -> Reply:
     )
 
 
+
+def view_svc(name: str, svc_name: str) -> Reply:
+    row = node_named(name)
+    return Reply(formatters.svc_block(row, svc_name), node_keyboard(name, row))
+
+
+def cmd_svc(args: list[str], flags: dict[str, str]) -> Reply:
+    if not args:
+        return Reply(i18n.t("usage.svc"), help_keyboard())
+    node = util.normalize_node_name(args[0])
+    rest = args[1:]
+    if rest and rest[0].lower() in {"off", "clear", "none"} and len(rest) == 1:
+        hub_call("POST", "/v1/nodes", {"action": "svc", "name": node, "clear": True})
+        return Reply(i18n.t("svc.cleared", name=report.h(node)), node_keyboard(node))
+    if not rest:
+        row = node_named(node)
+        specs = row.get("svc") or []
+        if not specs:
+            return Reply(i18n.t("svc.not_configured", name=report.h(node)), node_keyboard(node, row))
+        lines = [formatters.svc_block(row, str(spec.get("name"))) for spec in specs if spec.get("name")]
+        return Reply("\n\n".join(lines), node_keyboard(node, row))
+    svc_name = rest[0]
+    if len(rest) >= 2 and rest[1].lower() in {"off", "clear", "none"}:
+        hub_call(
+            "POST",
+            "/v1/nodes",
+            {"action": "svc", "name": node, "svc_name": svc_name, "clear": True},
+        )
+        return Reply(i18n.t("svc.removed", name=report.h(node), svc=report.h(svc_name)), node_keyboard(node))
+    ports_text = flags.get("ports") or ",".join(rest[1:])
+    proc = flags.get("proc") or svc_name
+    ports = util.parse_ports(ports_text)
+    hub_call(
+        "POST",
+        "/v1/nodes",
+        {
+            "action": "svc",
+            "name": node,
+            "svc_name": svc_name,
+            "ports": ports,
+            "proc": proc,
+        },
+    )
+    row = node_named(node)
+    return Reply(
+        i18n.t(
+            "svc.saved",
+            name=report.h(node),
+            svc=report.h(util.parse_svc_name(svc_name)),
+            ports=",".join(str(p) for p in ports),
+        )
+        + "\n\n"
+        + formatters.svc_block(row, util.parse_svc_name(svc_name)),
+        node_keyboard(node, row),
+    )
+
+
 def cmd_lang(args: list[str], _: dict[str, str]) -> Reply:
     code = (args[0] if args else "").strip().lower()
     i18n.set_lang(code)
@@ -690,6 +771,7 @@ HANDLERS = {
     "net": cmd_net,
     "bw": cmd_bw,
     "xray": cmd_xray,
+    "svc": cmd_svc,
     "uptime": cmd_uptime,
     "add": cmd_add,
     "cap": cmd_cap,
@@ -735,6 +817,10 @@ def handle_callback(data: str) -> Reply:
         return view_metric(kind, target)
     if cmd == "lang":
         return cmd_lang(args, {})
+    if cmd == "svcview":
+        if len(args) < 2:
+            return Reply(i18n.t("unknown.button"), help_keyboard())
+        return view_svc(args[0], args[1])
     if cmd == "bw":
         target = args[0] if args else ""
         if not target:

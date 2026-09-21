@@ -2,13 +2,17 @@
 """Build a compact JSON snapshot for hub heartbeats."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import hostinfo
 import report
 
 
-def build_snapshot(iface: str, reset_day: int) -> dict[str, Any]:
+def build_snapshot(
+    iface: str,
+    reset_day: int,
+    services: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
     bootstrap = report.load_json(report.state_dir() / "bootstrap.json")
     snap = report.collect_snapshot(iface, reset_day, bootstrap)
     host = hostinfo.collect_host(iface)
@@ -41,7 +45,6 @@ def build_snapshot(iface: str, reset_day: int) -> dict[str, Any]:
         "net_tx_bps": host.net_tx_bps,
         "net_window_sec": host.net_window_sec,
         "uptime_sec": host.uptime_sec,
-        "xray_ok": host.xray_ok,
-        "xray_rss": host.xray_rss,
+        "svc": hostinfo.probe_services(services or []),
         "hostname": host.hostname,
     }
