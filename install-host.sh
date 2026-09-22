@@ -34,7 +34,7 @@ usage: install-host.sh --role hub|agent [options]
   --hub URL          agent: fleet hub, e.g. https://HUB_HOST:8788
   --name NAME        node name, e.g. sg
   --cap 2T|500G|unlimited
-  --reset 27
+  --reset 27|27T08:00:00   UTC; time defaults to 00:00:00
   --iface eth0
 EOF
             exit 0
@@ -56,10 +56,12 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" ]]; then
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py \
+for required in report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
     locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
-    systemd/traffic-monitor.service systemd/traffic-monitor.timer; do
+    systemd/traffic-monitor.service systemd/traffic-monitor.timer \
+    systemd/traffic-cut.service systemd/traffic-cut.path \
+    systemd/traffic-cut-reconcile.service systemd/traffic-cut.timer; do
     if [[ ! -f "$bundle_dir/$required" ]]; then
         echo "bundle is missing $required" >&2
         exit 4
@@ -147,7 +149,16 @@ if cap_spec:
 else:
     cap_bytes = keep("MONTHLY_CAP_BYTES", "2000000000000")
 
-reset_day = os.environ.get("INSTALL_RESET") or keep("BILLING_RESET_DAY", "1")
+reset_spec = os.environ.get("INSTALL_RESET") or ""
+if reset_spec:
+    reset_day_i, reset_time = util.parse_reset(reset_spec)
+    reset_day = str(reset_day_i)
+else:
+    reset_day = keep("BILLING_RESET_DAY", "1")
+    try:
+        reset_time = util.parse_reset_time(keep("BILLING_RESET_TIME", "00:00:00"))
+    except ValueError:
+        reset_time = "00:00:00"
 port = int(keep("HUB_PORT", "8788") or "8788")
 hub_url = tlsutil.as_https(
     os.environ.get("INSTALL_HUB_URL") or keep("FLEET_HUB_URL") or keep("HUB_URL") or "",
@@ -168,6 +179,7 @@ merged = {
     "NODE_NAME": node_name,
     "TRAFFIC_IFACE": iface,
     "BILLING_RESET_DAY": str(reset_day),
+    "BILLING_RESET_TIME": reset_time,
     "MONTHLY_CAP_BYTES": cap_bytes,
     "DAILY_REPORT_HOUR_UTC": keep("DAILY_REPORT_HOUR_UTC", "16"),
     "HOST_LABEL": keep("HOST_LABEL"),
@@ -233,6 +245,53 @@ if not bootstrap.exists():
     }
     bootstrap.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+explicit_cap = bool(os.environ.get("INSTALL_CAP"))
+explicit_reset = bool(os.environ.get("INSTALL_RESET"))
+if explicit_cap or explicit_reset:
+    pushed = {}
+    if explicit_cap:
+        pushed["cap_bytes"] = None if cap_bytes in {"", "0"} else int(cap_bytes)
+    if explicit_reset:
+        pushed["reset_day"] = int(reset_day)
+        pushed["reset_time"] = reset_time
+        pushed["reset_set"] = True
+    if role == "hub":
+        inv_path = state_dir / "inventory.json"
+        inv = {}
+        if inv_path.is_file():
+            try:
+                inv = json.loads(inv_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                inv = {}
+        if not isinstance(inv, dict):
+            inv = {}
+        nodes = inv.get("nodes") if isinstance(inv.get("nodes"), dict) else {}
+        rec = dict(nodes.get(node_name) or {})
+        rec.update(pushed)
+        rec.setdefault("iface", iface)
+        rec.setdefault("enabled", True)
+        rec.setdefault("kind", "local")
+        rec.setdefault("reset_day", int(reset_day))
+        rec.setdefault("reset_time", reset_time)
+        rec.setdefault("reset_set", True)
+        nodes[node_name] = rec
+        inv["nodes"] = nodes
+        inv["kicked"] = inv.get("kicked") if isinstance(inv.get("kicked"), list) else []
+        inv_path.write_text(json.dumps(inv, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    else:
+        bill_path = state_dir / "billing.json"
+        bill = {}
+        if bill_path.is_file():
+            try:
+                bill = json.loads(bill_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                bill = {}
+        if not isinstance(bill, dict):
+            bill = {}
+        bill.update(pushed)
+        bill["from_install"] = pushed
+        bill_path.write_text(json.dumps(bill, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
 print(f"installed role={role} node={node_name}")
 PY
 
@@ -254,10 +313,17 @@ python3 -m py_compile /opt/traffic-monitor/*.py
 if command -v restorecon >/dev/null 2>&1; then
     restorecon -Rv /opt/traffic-monitor /var/lib/traffic-monitor \
         /etc/systemd/system/traffic-*.service \
-        /etc/systemd/system/traffic-*.timer >/dev/null || true
+        /etc/systemd/system/traffic-*.timer \
+        /etc/systemd/system/traffic-*.path >/dev/null || true
 fi
 
 systemctl daemon-reload
+systemctl disable traffic-cut.service >/dev/null 2>&1 || true
+systemctl enable traffic-cut.path traffic-cut.timer >/dev/null
+systemctl restart traffic-cut.path
+systemctl reset-failed traffic-cut.service traffic-cut-reconcile.service >/dev/null 2>&1 || true
+systemctl restart traffic-cut.timer
+systemctl start traffic-cut.service >/dev/null 2>&1 || true
 for leftover in vnstat.service vnstatd.service; do
     if systemctl list-unit-files --no-pager --no-legend "$leftover" 2>/dev/null | grep -q .; then
         systemctl disable --now "$leftover" >/dev/null 2>&1 || true

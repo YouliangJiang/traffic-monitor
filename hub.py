@@ -22,7 +22,7 @@ import i18n
 STALE_AFTER = 90
 MAX_JOB_WAIT = 50
 MAX_BODY = 262144
-JOB_KEEP_SEC = 120
+JOB_KEEP_SEC = 300
 MAX_JOBS = 64
 MAX_WORKERS = 16
 
@@ -33,6 +33,10 @@ class Hub:
         self.local_name = util.normalize_node_name(util.env_opt("NODE_NAME", "local"))
         self.iface = util.env_opt("TRAFFIC_IFACE", "eth0")
         self.reset_day = util.env_int("BILLING_RESET_DAY", 1)
+        try:
+            self.reset_time = util.parse_reset_time(util.env_opt("BILLING_RESET_TIME", "00:00:00"))
+        except ValueError:
+            self.reset_time = "00:00:00"
         raw_cap = util.env_opt("MONTHLY_CAP_BYTES", "")
         if raw_cap in {"", "0"}:
             self.local_cap: Optional[int] = None
@@ -46,6 +50,9 @@ class Hub:
         data = util.load_json(self.path)
         self.nodes: dict[str, dict[str, Any]] = data.get("nodes") or {}
         self.kicked: set[str] = set(data.get("kicked") or [])
+        for rec in self.nodes.values():
+            rec.setdefault("reset_time", "00:00:00")
+            rec.setdefault("reset_set", True)
         self._ensure_local()
 
     def _ensure_local(self) -> None:
@@ -55,6 +62,8 @@ class Hub:
             self.nodes[self.local_name] = {
                 "cap_bytes": self.local_cap,
                 "reset_day": self.reset_day,
+                "reset_time": self.reset_time,
+                "reset_set": True,
                 "iface": self.iface,
                 "enabled": True,
                 "kind": "local",
@@ -82,6 +91,8 @@ class Hub:
         rec = dict(existing) if existing else {
             "cap_bytes": meta.get("cap_bytes"),
             "reset_day": meta.get("reset_day") or 1,
+            "reset_time": meta.get("reset_time") or "00:00:00",
+            "reset_set": bool(meta.get("reset_set", True)),
             "iface": meta.get("iface") or "eth0",
             "enabled": True,
             "kind": "agent",
@@ -91,22 +102,53 @@ class Hub:
         rec.setdefault("enabled", True)
         rec.setdefault("iface", meta.get("iface") or "eth0")
         rec.setdefault("reset_day", meta.get("reset_day") or 1)
+        rec.setdefault("reset_time", meta.get("reset_time") or "00:00:00")
+        rec.setdefault("reset_set", True)
         if "cap_bytes" not in rec:
             rec["cap_bytes"] = meta.get("cap_bytes")
+        apply = meta.get("apply_config")
+        if isinstance(apply, dict):
+            if "cap_bytes" in apply:
+                raw_cap = apply.get("cap_bytes")
+                rec["cap_bytes"] = None if raw_cap in (None, "", 0, "0") else int(raw_cap)
+            if apply.get("reset_day"):
+                rec["reset_day"] = int(apply.get("reset_day") or rec.get("reset_day") or 1)
+            if apply.get("reset_time"):
+                try:
+                    rec["reset_time"] = util.parse_reset_time(str(apply.get("reset_time")))
+                except ValueError:
+                    pass
+            if "reset_set" in apply:
+                rec["reset_set"] = bool(apply.get("reset_set"))
         self.nodes[name] = rec
         if rec != existing:
             self._save()
 
-    def add_node(self, name: str, cap: Optional[int], reset_day: int, iface: str, note: str = "") -> dict[str, Any]:
+    def add_node(
+        self,
+        name: str,
+        cap: Optional[int],
+        reset_day: int,
+        iface: str,
+        note: str = "",
+        reset_time: str = "00:00:00",
+        reset_set: bool = True,
+    ) -> dict[str, Any]:
         name = util.normalize_node_name(name)
         if not util.valid_node_name(name):
             raise ValueError(i18n.t("hub.bad_name"))
         self.kicked.discard(name)
         rec = self.nodes.get(name) or {}
+        try:
+            reset_time = util.parse_reset_time(reset_time)
+        except ValueError:
+            reset_time = "00:00:00"
         rec.update(
             {
                 "cap_bytes": cap,
-                "reset_day": reset_day,
+                "reset_day": int(reset_day or 1),
+                "reset_time": reset_time,
+                "reset_set": bool(reset_set),
                 "iface": iface or "eth0",
                 "enabled": True,
                 "kind": rec.get("kind") or "agent",
@@ -139,6 +181,13 @@ class Hub:
     def set_cap(self, name: str, cap: Optional[int]) -> None:
         rec = self._require(name)
         rec["cap_bytes"] = cap
+        self._save()
+
+    def set_reset(self, name: str, reset_day: int, reset_time: str = "00:00:00") -> None:
+        rec = self._require(name)
+        rec["reset_day"] = int(reset_day)
+        rec["reset_time"] = util.parse_reset_time(reset_time)
+        rec["reset_set"] = True
         self._save()
 
     def svc_specs(self, name: str) -> list[dict[str, Any]]:
@@ -214,14 +263,18 @@ class Hub:
         return job_id
 
     def pop_jobs(self, name: str) -> list[dict[str, Any]]:
+        """Hand the agent one queued job. The rest stay pending for the next sync."""
         with self.lock:
             rt = self.runtime.setdefault(name, {})
             ids = list(rt.get("pending") or [])
-            rt["pending"] = []
             jobs = []
+            rest: list[str] = []
+            taken = False
             for job_id in ids:
                 job = self.jobs.get(job_id)
-                if job and job["status"] == "queued":
+                if not job or job["status"] != "queued":
+                    continue
+                if not taken:
                     job["status"] = "running"
                     jobs.append(
                         {
@@ -230,7 +283,14 @@ class Hub:
                             "params": job["params"],
                         }
                     )
-        self.event_for(name).clear()
+                    taken = True
+                    continue
+                rest.append(job_id)
+            rt["pending"] = rest
+        if rest:
+            self.event_for(name).set()
+        else:
+            self.event_for(name).clear()
         return jobs
 
     def finish_job(self, job_id: str, ok: bool, data: Any = None, error: str = "") -> None:
@@ -287,6 +347,10 @@ class Hub:
         iface = rec.get("iface") or self.iface
         try:
             if job["type"] == "bw":
+                snap = (self.runtime.get(self.local_name) or {}).get("snapshot") or {}
+                if (snap.get("cut") or {}).get("want") == "cut":
+                    self.finish_job(job_id, False, error="cutoff active")
+                    return
                 seconds = float((job.get("params") or {}).get("seconds") or 3)
                 data = hostinfo.sample_bandwidth(iface, seconds)
                 self.finish_job(job_id, True, data)
@@ -303,8 +367,24 @@ class Hub:
         rec = self.nodes.get(self.local_name) or {}
         iface = rec.get("iface") or self.iface
         reset_day = int(rec.get("reset_day") or self.reset_day)
+        reset_time = rec.get("reset_time") or self.reset_time
+        reset_set = bool(rec.get("reset_set", True))
+        allow_cut = bool(rec.get("enabled", True))
         specs = util.normalize_svc_list(rec.get("svc"))
-        snap = snapshot.build_snapshot(iface, reset_day, specs)
+        cap = rec.get("cap_bytes")
+        if cap in (None, "", 0, "0"):
+            cap = None
+        else:
+            cap = int(cap)
+        snap = snapshot.build_snapshot(
+            iface,
+            reset_day,
+            specs,
+            reset_time=reset_time,
+            cap=cap,
+            reset_set=reset_set,
+            allow_cut=allow_cut,
+        )
         snap["name"] = self.local_name
         self.put_snapshot(self.local_name, snap)
 
@@ -330,22 +410,69 @@ class Hub:
                 rec["period"] = period
                 changed = True
             fired = {int(x) for x in rec.get("fired") or []}
-            newly = [mark for mark in (50, 70, 85, 95, 100) if pct >= mark and mark not in fired]
-            if not newly:
-                continue
-            rec["fired"] = sorted(fired | set(newly))
-            changed = True
-            marks = i18n.t("sep.list").join(f"{m}%" for m in newly)
-            text = i18n.t(
-                "hub.alert",
-                name=report.h(name),
-                marks=marks,
-                detail=formatters.node_detail(row),
-            )
-            try:
-                report.send_telegram(token, chat_id, text)
-            except Exception:
-                traceback.print_exc()
+            newly = [mark for mark in report.THRESHOLDS if pct >= mark and mark not in fired]
+            if newly:
+                rec["fired"] = sorted(fired | set(newly))
+                changed = True
+                marks = i18n.t("sep.list").join(f"{m}%" for m in newly)
+                text = i18n.t(
+                    "hub.alert",
+                    name=report.h(name),
+                    marks=marks,
+                    detail=formatters.node_detail(row),
+                )
+                try:
+                    report.send_telegram(token, chat_id, text)
+                except Exception:
+                    traceback.print_exc()
+            cut_info = (row.get("snapshot") or {}).get("cut") or {}
+            want = str(cut_info.get("want") or "pass")
+            applied = str(cut_info.get("applied") or "pass")
+            prev_cut = str(rec.get("cut") or "pass")
+            applied_ok = cut_info.get("ok")
+            if want == "cut" and applied == "cut" and applied_ok is not False and prev_cut != "cut":
+                rec["cut"] = "cut"
+                rec["cut_period"] = period
+                changed = True
+                text = i18n.t(
+                    "hub.cut_on",
+                    name=report.h(name),
+                    pct=f"{pct:.1f}",
+                    detail=formatters.node_detail(row),
+                    err=report.h(cut_info.get("error") or ""),
+                )
+                try:
+                    report.send_telegram(token, chat_id, text)
+                except Exception:
+                    traceback.print_exc()
+            elif want == "cut" and applied_ok is False and prev_cut != "fail":
+                rec["cut"] = "fail"
+                changed = True
+                text = i18n.t(
+                    "hub.cut_fail",
+                    name=report.h(name),
+                    pct=f"{pct:.1f}",
+                    detail=formatters.node_detail(row),
+                    err=report.h(cut_info.get("error") or ""),
+                )
+                try:
+                    report.send_telegram(token, chat_id, text)
+                except Exception:
+                    traceback.print_exc()
+            elif want == "pass" and applied == "pass" and prev_cut in {"cut", "fail"}:
+                rec["cut"] = "pass"
+                changed = True
+                cut_period = str(rec.get("cut_period") or "")
+                key = "hub.cut_off" if cut_period and cut_period != str(period or "") else "hub.cut_off_early"
+                text = i18n.t(
+                    key,
+                    name=report.h(name),
+                    detail=formatters.node_detail(row),
+                )
+                try:
+                    report.send_telegram(token, chat_id, text)
+                except Exception:
+                    traceback.print_exc()
         if changed:
             util.save_json(path, state)
 
@@ -372,9 +499,6 @@ class Hub:
             cap = rec.get("cap_bytes")
             used = int(snap.get("period_total") or 0)
             specs = util.normalize_svc_list(rec.get("svc"))
-            if name == self.local_name and specs:
-                snap = dict(snap)
-                snap["svc"] = hostinfo.probe_services(specs)
             rows.append(
                 {
                     "name": name,
@@ -382,6 +506,8 @@ class Hub:
                     "kind": rec.get("kind") or "agent",
                     "cap_bytes": cap,
                     "reset_day": rec.get("reset_day") or 1,
+                    "reset_time": rec.get("reset_time") or "00:00:00",
+                    "reset_set": bool(rec.get("reset_set", True)),
                     "iface": rec.get("iface") or "eth0",
                     "note": rec.get("note") or "",
                     "svc": specs,
@@ -499,7 +625,9 @@ class HubHandler(BaseHTTPRequestHandler):
                     {
                         "cap_bytes": body.get("cap_bytes"),
                         "reset_day": body.get("reset_day"),
+                        "reset_time": body.get("reset_time"),
                         "iface": body.get("iface"),
+                        "apply_config": body.get("apply_config"),
                     },
                 )
             except PermissionError:
@@ -521,8 +649,24 @@ class HubHandler(BaseHTTPRequestHandler):
             wait = max(0.0, min(25.0, wait))
             if wait and not (HUB.runtime.get(name) or {}).get("pending"):
                 HUB.event_for(name).wait(timeout=wait)
+            if name in HUB.kicked:
+                self._send(403, {"ok": False, "error": "kicked"})
+                return
             jobs = HUB.pop_jobs(name)
-            self._send(200, {"ok": True, "jobs": jobs, "svc": HUB.svc_specs(name)})
+            rec = HUB.nodes.get(name) or {}
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "jobs": jobs,
+                    "svc": HUB.svc_specs(name),
+                    "cap_bytes": rec.get("cap_bytes"),
+                    "reset_day": rec.get("reset_day") or 1,
+                    "reset_time": rec.get("reset_time") or "00:00:00",
+                    "reset_set": bool(rec.get("reset_set", True)),
+                    "enabled": bool(rec.get("enabled", True)),
+                },
+            )
             return
         if parsed.path == "/v1/jobs":
             name = str(body.get("node") or "")
@@ -541,12 +685,16 @@ class HubHandler(BaseHTTPRequestHandler):
             try:
                 if action == "add":
                     cap = body.get("cap_bytes")
+                    raw_flag = body.get("reset_set")
+                    reset_set = True if raw_flag is None else bool(raw_flag)
                     rec = HUB.add_node(
                         name,
                         cap if cap != "unlimited" else None,
                         int(body.get("reset_day") or 1),
                         str(body.get("iface") or "eth0"),
                         str(body.get("note") or ""),
+                        str(body.get("reset_time") or "00:00:00"),
+                        reset_set,
                     )
                     self._send(200, {"ok": True, "node": rec, "name": util.normalize_node_name(name)})
                     return
@@ -564,6 +712,14 @@ class HubHandler(BaseHTTPRequestHandler):
                     return
                 if action == "cap":
                     HUB.set_cap(name, body.get("cap_bytes"))
+                    self._send(200, {"ok": True})
+                    return
+                if action == "reset":
+                    HUB.set_reset(
+                        name,
+                        int(body.get("reset_day") or 1),
+                        str(body.get("reset_time") or "00:00:00"),
+                    )
                     self._send(200, {"ok": True})
                     return
                 if action == "svc":

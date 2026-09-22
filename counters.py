@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Persistent per-day eth counters. Replaces vnstat; stdlib only."""
+"""One NIC timeline. Each bucket is one UTC minute."""
 from __future__ import annotations
 
-import json
-import subprocess
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import util
+
+MINUTE_FMT = "%Y-%m-%dT%H:%M"
 
 
 def _iface_bytes(iface: str) -> tuple[int, int]:
@@ -40,41 +40,64 @@ def _save(data: dict[str, Any]) -> None:
     util.save_json(_path(), data)
 
 
-def _seed_from_vnstat(iface: str) -> dict[str, dict[str, int]]:
-    """One-time import if vnstat is already on the box from an older install."""
-    days: dict[str, dict[str, int]] = {}
+def _minute_key(when: datetime) -> str:
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    else:
+        when = when.astimezone(timezone.utc)
+    return when.strftime(MINUTE_FMT)
+
+
+def _parse_minute(key: str) -> Optional[datetime]:
     try:
-        proc = subprocess.run(
-            ["vnstat", "--json", "d", "-i", iface],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return days
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return days
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return days
-    for item in payload.get("interfaces") or []:
-        if item.get("name") != iface:
+        return datetime.strptime(str(key), MINUTE_FMT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _fold_legacy_days(data: dict[str, Any]) -> None:
+    """Move old per-day totals into the minute timeline once, then drop them.
+
+    A day total has no clock time. It is placed at 00:00 UTC, which is the
+    same default used when a reset is configured as a day only.
+    """
+    days = data.get("days")
+    if not isinstance(days, dict) or not days:
+        data.pop("days", None)
+        return
+    minutes: dict[str, Any] = data.setdefault("minutes", {})
+    covered: dict[str, tuple[int, int]] = {}
+    for key, entry in minutes.items():
+        text = str(key)
+        if len(text) < 10:
             continue
-        for entry in (item.get("traffic") or {}).get("day") or []:
-            raw = entry.get("date") or {}
-            try:
-                key = date(int(raw["year"]), int(raw["month"]), int(raw["day"])).isoformat()
-            except (KeyError, TypeError, ValueError):
-                continue
-            days[key] = {"rx": int(entry.get("rx") or 0), "tx": int(entry.get("tx") or 0)}
-    return days
+        day = text[:10]
+        drx = int((entry or {}).get("rx") or 0)
+        dtx = int((entry or {}).get("tx") or 0)
+        prev = covered.get(day, (0, 0))
+        covered[day] = (prev[0] + drx, prev[1] + dtx)
+    for day_key, entry in days.items():
+        day = str(day_key)
+        day_rx = int((entry or {}).get("rx") or 0)
+        day_tx = int((entry or {}).get("tx") or 0)
+        got = covered.get(day)
+        extra_rx = day_rx if got is None else day_rx - got[0]
+        extra_tx = day_tx if got is None else day_tx - got[1]
+        if extra_rx <= 0 and extra_tx <= 0:
+            continue
+        slot_key = f"{day}T00:00"
+        slot = minutes.setdefault(slot_key, {"rx": 0, "tx": 0})
+        slot["rx"] = int(slot.get("rx") or 0) + max(0, extra_rx)
+        slot["tx"] = int(slot.get("tx") or 0) + max(0, extra_tx)
+    data.pop("days", None)
 
 
-def record_sample(iface: str, now: Optional[datetime] = None) -> list[tuple[date, int, int]]:
+def record_sample(iface: str, now: Optional[datetime] = None) -> None:
     now = now or datetime.now(timezone.utc)
-    today = now.date().isoformat()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
     rx, tx = _iface_bytes(iface)
     boot = _boot_id()
     data = _load()
@@ -85,44 +108,58 @@ def record_sample(iface: str, now: Optional[datetime] = None) -> list[tuple[date
             "last_rx": rx,
             "last_tx": tx,
             "last_ts": now.isoformat(),
-            "days": _seed_from_vnstat(iface),
+            "minutes": {},
         }
-        data["days"].setdefault(today, {"rx": 0, "tx": 0})
         _save(data)
-        return _as_tuples(data)
-    days = data.setdefault("days", {})
-    days.setdefault(today, {"rx": 0, "tx": 0})
+        return
+    _fold_legacy_days(data)
+    minutes: dict[str, Any] = data.setdefault("minutes", {})
     same_boot = boot and boot == data.get("boot_id")
     last_rx = int(data.get("last_rx") or 0)
     last_tx = int(data.get("last_tx") or 0)
     if same_boot and rx >= last_rx and tx >= last_tx:
-        days[today]["rx"] = int(days[today].get("rx") or 0) + (rx - last_rx)
-        days[today]["tx"] = int(days[today].get("tx") or 0) + (tx - last_tx)
+        key = _minute_key(now)
+        slot = minutes.setdefault(key, {"rx": 0, "tx": 0})
+        slot["rx"] = int(slot.get("rx") or 0) + (rx - last_rx)
+        slot["tx"] = int(slot.get("tx") or 0) + (tx - last_tx)
     cutoff = (now.date() - timedelta(days=400)).isoformat()
-    data["days"] = {key: value for key, value in days.items() if key >= cutoff}
+    data["minutes"] = {key: value for key, value in minutes.items() if str(key) >= cutoff}
     data["iface"] = iface
     data["boot_id"] = boot
     data["last_rx"] = rx
     data["last_tx"] = tx
     data["last_ts"] = now.isoformat()
     _save(data)
-    return _as_tuples(data)
 
 
-def _as_tuples(data: dict[str, Any]) -> list[tuple[date, int, int]]:
-    rows: list[tuple[date, int, int]] = []
-    for key, entry in (data.get("days") or {}).items():
-        try:
-            day = date.fromisoformat(key)
-        except ValueError:
+def _as_utc(when: datetime) -> datetime:
+    if when.tzinfo is None:
+        return when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
+def sum_between(start: datetime, end: datetime) -> tuple[int, int]:
+    """Bytes whose minute starts in [start, end)."""
+    start = _as_utc(start)
+    end = _as_utc(end)
+    rx = tx = 0
+    for key, entry in (_load().get("minutes") or {}).items():
+        ts = _parse_minute(str(key))
+        if ts is None or not (start <= ts < end):
             continue
-        rows.append((day, int(entry.get("rx") or 0), int(entry.get("tx") or 0)))
-    rows.sort()
-    return rows
+        rx += int((entry or {}).get("rx") or 0)
+        tx += int((entry or {}).get("tx") or 0)
+    return rx, tx
 
 
-def load_days(iface: str) -> list[tuple[date, int, int]]:
-    data = _load()
-    if not data:
-        return record_sample(iface)
-    return _as_tuples(data)
+def day_rows() -> list[tuple[date, int, int]]:
+    """Per local-day totals. Minute keys stay absolute UTC instants."""
+    totals: dict[date, list[int]] = {}
+    for key, entry in (_load().get("minutes") or {}).items():
+        ts = _parse_minute(str(key))
+        if ts is None:
+            continue
+        bucket = totals.setdefault(ts.astimezone(util.local_tz()).date(), [0, 0])
+        bucket[0] += int((entry or {}).get("rx") or 0)
+        bucket[1] += int((entry or {}).get("tx") or 0)
+    return [(day, rx, tx) for day, (rx, tx) in sorted(totals.items())]

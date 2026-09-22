@@ -1,0 +1,21 @@
+[Unit]
+Description=Restore traffic cutoff when the billing period rolls
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/traffic-monitor.env
+WorkingDirectory=/opt/traffic-monitor
+ExecStart=/usr/bin/python3 /opt/traffic-monitor/cutctl.py --reconcile
+Nice=5
+TasksMax=8
+MemoryAccounting=yes
+MemoryMax=32M
+PrivateTmp=true
+ProtectHome=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE

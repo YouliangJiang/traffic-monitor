@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch traffic-monitor cutoff desired state
+
+[Path]
+PathChanged=/var/lib/traffic-monitor/cut-desired.json
+Unit=traffic-cut.service
+
+[Install]
+WantedBy=multi-user.target

@@ -2,8 +2,11 @@
 """Telegram fleet bot. Talks to local hub; only the configured chat can control it."""
 from __future__ import annotations
 
+import queue
+from datetime import datetime
 import re
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -30,6 +33,7 @@ COMMAND_KEYS = [
     "uptime",
     "add",
     "cap",
+    "reset",
     "kick",
     "off",
     "on",
@@ -62,6 +66,7 @@ ALIASES = {
     "/uptime": "uptime",
     "/add": "add",
     "/cap": "cap",
+    "/reset": "reset",
     "/kick": "kick",
     "/remove": "kick",
     "/on": "on",
@@ -290,8 +295,8 @@ def telegram_ok_to_ignore(exc: Exception) -> bool:
 
 
 def _with_stamp(text: str) -> str:
-    ts = time.strftime("%H:%M:%S", time.gmtime())
-    return text.rstrip() + f"\n\n<i>{ts} UTC</i>"
+    ts = datetime.now().astimezone().strftime("%H:%M:%S %Z")
+    return text.rstrip() + f"\n\n<i>{ts}</i>"
 
 
 def loading_text(data: str) -> str:
@@ -633,7 +638,12 @@ def cmd_add(args: list[str], flags: dict[str, str]) -> Reply:
     name = args[0]
     cap_text = flags.get("cap", "unlimited")
     cap = util.parse_cap(cap_text)
-    reset_day = int(flags.get("reset") or flags.get("reset_day") or 1)
+    reset_raw = flags.get("reset") or flags.get("reset_day") or ""
+    reset_set = bool(str(reset_raw).strip())
+    if reset_set:
+        reset_day, reset_time = util.parse_reset(str(reset_raw))
+    else:
+        reset_day, reset_time = 1, "00:00:00"
     iface = flags.get("iface") or "eth0"
     hub_call(
         "POST",
@@ -643,11 +653,19 @@ def cmd_add(args: list[str], flags: dict[str, str]) -> Reply:
             "name": name,
             "cap_bytes": cap,
             "reset_day": reset_day,
+            "reset_time": reset_time,
+            "reset_set": reset_set,
             "iface": iface,
         },
     )
     return Reply(
-        formatters.add_help(util.normalize_node_name(name), public_hub(), util.format_cap(cap), reset_day),
+        formatters.add_help(
+            util.normalize_node_name(name),
+            public_hub(),
+            util.format_cap(cap),
+            reset_day,
+            reset_time,
+        ),
         home_keyboard(),
     )
 
@@ -659,6 +677,31 @@ def cmd_cap(args: list[str], flags: dict[str, str]) -> Reply:
     hub_call("POST", "/v1/nodes", {"action": "cap", "name": args[0], "cap_bytes": cap})
     name = util.normalize_node_name(args[0])
     return Reply(i18n.t("cap.changed", name=report.h(name), cap=report.h(util.format_cap(cap))), node_keyboard(name))
+
+
+def cmd_reset(args: list[str], flags: dict[str, str]) -> Reply:
+    if len(args) < 2:
+        return Reply(i18n.t("usage.reset"), help_keyboard())
+    reset_day, reset_time = util.parse_reset(args[1])
+    hub_call(
+        "POST",
+        "/v1/nodes",
+        {
+            "action": "reset",
+            "name": args[0],
+            "reset_day": reset_day,
+            "reset_time": reset_time,
+        },
+    )
+    name = util.normalize_node_name(args[0])
+    return Reply(
+        i18n.t(
+            "reset.changed",
+            name=report.h(name),
+            reset=report.h(util.format_reset(reset_day, reset_time)),
+        ),
+        node_keyboard(name),
+    )
 
 
 def cmd_kick(args: list[str], _: dict[str, str]) -> Reply:
@@ -775,6 +818,7 @@ HANDLERS = {
     "uptime": cmd_uptime,
     "add": cmd_add,
     "cap": cmd_cap,
+    "reset": cmd_reset,
     "kick": cmd_kick,
     "on": cmd_on,
     "off": cmd_off,
@@ -879,7 +923,7 @@ def poll(token: str, offset: int) -> tuple[int, list[dict[str, Any]]]:
     if offset:
         payload["offset"] = offset
     try:
-        body = report.telegram_call(token, "getUpdates", payload, timeout=60)
+        body = report.telegram_call(token, "getUpdates", payload, timeout=60, shared=False)
     except (urllib.error.URLError, TimeoutError) as exc:
         print(f"poll retry: {exc}", flush=True)
         time.sleep(2)
@@ -917,6 +961,88 @@ def _dispatch_callback(data: str) -> Reply:
         return Reply(i18n.t("query.fail"), help_keyboard())
 
 
+
+_slow_q: "queue.Queue[tuple]" = queue.Queue()
+_screen_lock = threading.Lock()
+_screen = {"msg": None, "gen": 0}
+
+
+def _note_screen(msg_id: Optional[int]) -> int:
+    with _screen_lock:
+        _screen["msg"] = msg_id
+        _screen["gen"] += 1
+        return int(_screen["gen"])
+
+
+def _screen_is(msg_id: Optional[int], gen: int) -> bool:
+    with _screen_lock:
+        return _screen["msg"] == msg_id and _screen["gen"] == gen
+
+
+def _callback_is_slow(data: str) -> bool:
+    cmd, args = parse_callback(data)
+    if cmd == "bw":
+        return True
+    return cmd == "metric" and args[:1] == ["net"]
+
+
+def _text_is_slow(text: str) -> bool:
+    cmd, _args, _flags = parse_message(text)
+    return cmd in {"bw", "net"}
+
+
+def _deliver(token: str, chat_id: str, reply: Reply, edit_id: Optional[int], gen: int) -> str:
+    if edit_id and _screen_is(edit_id, gen):
+        return send_reply(token, chat_id, reply, edit_message_id=edit_id)
+    return send_reply(token, chat_id, reply)
+
+
+def _slow_worker(token: str, chat_id: str) -> None:
+    """Run NIC samples and speed tests off the poll thread.
+
+    The button spinner stays up until the result is written and the callback
+    is answered. Editing the message earlier makes Telegram clear that spinner.
+    """
+    while True:
+        kind, data, edit_id, gen, qid = _slow_q.get()
+        t0 = time.monotonic()
+        reply = Reply(i18n.t("query.fail"), help_keyboard())
+        try:
+            if kind == "cb":
+                reply = _dispatch_callback(str(data))
+            else:
+                reply = _dispatch(str(data))
+            if not reply.text:
+                reply = Reply(i18n.t("no_content"), help_keyboard())
+            status = _deliver(token, chat_id, reply, edit_id if kind == "cb" else None, gen)
+        except Exception:
+            traceback.print_exc()
+            status = "failed"
+            try:
+                status = _deliver(
+                    token,
+                    chat_id,
+                    Reply(i18n.t("query.fail"), help_keyboard()),
+                    edit_id if kind == "cb" else None,
+                    gen,
+                )
+            except Exception:
+                traceback.print_exc()
+        if qid:
+            answer_callback(token, qid, toast_for_reply(reply.text or "", status))
+        print(f"slow {kind} {data} {time.monotonic()-t0:.1f}s {status}", flush=True)
+        _slow_q.task_done()
+
+
+def _start_slow_worker(token: str, chat_id: str) -> None:
+    threading.Thread(
+        target=_slow_worker,
+        args=(token, chat_id),
+        name="bot-slow",
+        daemon=True,
+    ).start()
+
+
 def main() -> int:
     token = util.env("TELEGRAM_BOT_TOKEN")
     chat_id = util.env("TELEGRAM_CHAT_ID")
@@ -933,79 +1059,82 @@ def main() -> int:
         state["fleet_hello_sent"] = True
         util.save_json(state_path, state)
     print(f"traffic-bot fleet hub={hub_base()}", flush=True)
-    last_cmd = 0.0
+    _start_slow_worker(token, chat_id)
     while True:
         offset, updates = poll(token, offset)
-        if offset:
-            save_offset(offset)
         for update in updates:
-            callback = update.get("callback_query")
-            if callback:
-                message = callback.get("message") or {}
-                if not allowed_chat(message, chat_id) and not allowed_chat(callback, chat_id):
-                    continue
-                qid = str(callback.get("id") or "")
-                now = time.monotonic()
-                if now - last_cmd < 0.35:
-                    answer_callback(token, qid, i18n.t("toast.wait"))
-                    continue
-                last_cmd = now
-                data = str(callback.get("data") or "")
-                msg_id = message.get("message_id")
-                edit_id = int(msg_id) if msg_id else None
-                toast = ""
-                t0 = time.monotonic()
-                try:
-                    send_reply(
-                        token,
-                        chat_id,
-                        Reply(loading_text(data)),
-                        edit_message_id=edit_id,
-                    )
-                    reply = _dispatch_callback(data)
-                    t1 = time.monotonic()
-                    status = "failed"
-                    if reply.text:
-                        status = send_reply(token, chat_id, reply, edit_message_id=edit_id)
-                    else:
-                        status = send_reply(
-                            token,
-                            chat_id,
-                            Reply(i18n.t("no_content"), help_keyboard()),
-                            edit_message_id=edit_id,
-                        )
-                    t2 = time.monotonic()
-                    shown = reply.text or i18n.t("no_content")
-                    print(f"cb {data} hub={t1-t0:.3f}s tg={t2-t1:.3f}s {status}", flush=True)
-                    toast = toast_for_reply(shown, status)
-                except Exception:
-                    traceback.print_exc()
-                    toast = i18n.t("toast.failed")
+            try:
+                callback = update.get("callback_query")
+                if callback:
+                    message = callback.get("message") or {}
+                    if not allowed_chat(message, chat_id) and not allowed_chat(callback, chat_id):
+                        continue
+                    qid = str(callback.get("id") or "")
+                    data = str(callback.get("data") or "")
+                    msg_id = message.get("message_id")
+                    edit_id = int(msg_id) if msg_id else None
+                    gen = _note_screen(edit_id)
+                    if _callback_is_slow(data):
+                        _slow_q.put(("cb", data, edit_id, gen, qid))
+                        continue
+                    toast = ""
+                    t0 = time.monotonic()
                     try:
                         send_reply(
                             token,
                             chat_id,
-                            Reply(i18n.t("query.fail"), help_keyboard()),
+                            Reply(loading_text(data)),
                             edit_message_id=edit_id,
                         )
+                        reply = _dispatch_callback(data)
+                        t1 = time.monotonic()
+                        status = "failed"
+                        shown = reply.text or i18n.t("no_content")
+                        if reply.text:
+                            status = _deliver(token, chat_id, reply, edit_id, gen)
+                        else:
+                            status = _deliver(
+                                token,
+                                chat_id,
+                                Reply(i18n.t("no_content"), help_keyboard()),
+                                edit_id,
+                                gen,
+                            )
+                        t2 = time.monotonic()
+                        print(f"cb {data} hub={t1-t0:.3f}s tg={t2-t1:.3f}s {status}", flush=True)
+                        toast = toast_for_reply(shown, status)
                     except Exception:
-                        pass
-                answer_callback(token, qid, toast)
-                continue
-            message = update.get("message") or {}
-            if not allowed_chat(message, chat_id):
-                continue
-            now = time.monotonic()
-            if now - last_cmd < 1.0:
-                continue
-            last_cmd = now
-            text = message.get("text") or ""
-            reply = _dispatch(text)
-            if reply.text:
-                try:
-                    send_reply(token, chat_id, reply)
-                except Exception:
-                    traceback.print_exc()
+                        traceback.print_exc()
+                        toast = i18n.t("toast.failed")
+                        try:
+                            _deliver(
+                                token,
+                                chat_id,
+                                Reply(i18n.t("query.fail"), help_keyboard()),
+                                edit_id,
+                                gen,
+                            )
+                        except Exception:
+                            pass
+                    answer_callback(token, qid, toast)
+                    continue
+                message = update.get("message") or {}
+                if not allowed_chat(message, chat_id):
+                    continue
+                body = message.get("text") or ""
+                if _text_is_slow(body):
+                    send_reply(token, chat_id, Reply(i18n.t("loading.generic")))
+                    _slow_q.put(("text", body, None, 0, ""))
+                    continue
+                reply = _dispatch(body)
+                if reply.text:
+                    try:
+                        send_reply(token, chat_id, reply)
+                    except Exception:
+                        traceback.print_exc()
+            finally:
+                offset = int(update["update_id"]) + 1
+                save_offset(offset)
     return 0
 
 

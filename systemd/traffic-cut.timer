@@ -1,0 +1,12 @@
+[Unit]
+Description=Check whether a monthly-cap cutoff should be lifted
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=60
+AccuracySec=10
+Persistent=true
+Unit=traffic-cut-reconcile.service
+
+[Install]
+WantedBy=timers.target

@@ -21,11 +21,25 @@ Tap **中文** / **English** on a message to switch UI language. The choice is s
 ## How traffic is counted
 
 - Read rx/tx bytes for a chosen NIC (default `eth0`) from `/proc/net/dev`. Inbound and outbound both count.
-- Deltas are added to a daily ledger at `/var/lib/traffic-monitor/traffic.json`. If the monitor process dies briefly but the host does not reboot, the kernel counters remain and the next sample fills the gap.
-- Billing periods use **UTC**. Reset day comes from `BILLING_RESET_DAY`. Caps are **decimal** (`2T` = 2×10¹² bytes), matching most cloud "plan includes in+out" wording.
+- Deltas are stored on one timeline in `/var/lib/traffic-monitor/traffic.json`. A day-only reset means `00:00:00`. If the monitor process dies briefly but the host does not reboot, the kernel counters remain and the next sample fills the gap.
+- Billing periods use the host timezone (`timedatectl`). The reset instant is `BILLING_RESET_DAY` plus optional `BILLING_RESET_TIME` (`HH`, `HH:MM`, or `HH:MM:SS`; omitted minutes and seconds are 0, a day alone is `00:00:00`). Caps are **decimal** (`2T` = 2×10¹² bytes), matching most cloud "plan includes in+out" wording.
 - First install writes `bootstrap.json` so usage since the current boot, before the monitor was installed, can be included.
 
 This is an early-warning ledger, not a cloud invoice. A short gap is lost between the last sample and shutdown; hypervisor billing and the host NIC also differ in normal ways. If overage is egress-only, look at the outbound figure separately.
+
+
+## Cutoff when the monthly cap is nearly gone
+
+**Requirement:** the node has both a monthly cap (`MONTHLY_CAP_BYTES` not 0) and a reset instant. Unlimited nodes are never cut. You do not configure ports or service names for this.
+
+- At **80%** of the cap: Telegram alert.
+- At **90%**: host nftables drops public traffic (10% buffer) until the reset instant, then restores automatically. `/add` without a reset instant only keeps the ledger; it does not arm cutoff.
+- Usage is one timeline, so a reset that is not midnight splits that local day.
+- Kept: SSH, this monitor (agent↔hub and hub Telegram), DNS/NTP/DHCP, link-local `169.254.0.0/16` (cloud metadata/vendor agents), RFC1918 private paths, `tailscale0`, and `tailscaled`'s own tunnel underlay. Everything else to/from the public internet is dropped.
+- A separate root helper `traffic-cut.service` applies the table; the unprivileged monitor cannot change firewall rules. `traffic-cut.timer` runs once a minute: if the monitor is down it still lifts the rules after the reset instant, and it refreshes Telegram addresses while a cutoff is in place.
+- This is not the cloud invoice: inbound floods still follow the provider’s rules; the host only stops sending large replies.
+
+Reset can be second-precise, e.g. `/reset node 27T08:00:00` or `--reset 27T08:00:00`. A day-only value means 00:00:00 that day in the host timezone. An hour alone means minute and second 0.
 
 ## Roles
 
@@ -33,7 +47,7 @@ This is an early-warning ledger, not a cloud invoice. A short gap is lost betwee
 
 - `traffic-hub`: inventory, heartbeats, local sampling (~every 20s)
 - `traffic-bot`: Telegram long poll; only the configured `TELEGRAM_CHAT_ID` is accepted
-- `traffic-monitor.timer`: daily summary (default 16:00 UTC)
+- `traffic-monitor.timer`: daily summary (default 16:00 host local time)
 
 **Agent** (more hosts)
 
@@ -90,8 +104,9 @@ Send the bot a message first, then set `TELEGRAM_CHAT_ID`. After that, prefer th
 | `/svc name xray off` | Remove that service |
 | NIC or `/net name` | Sample current NIC occupancy for ~3s, **no generated traffic** |
 | Speed test or `/bw name [seconds]` | Download/upload via Cloudflare (public bandwidth) |
-| `/add name cap=2T reset=27` | Add to coverage |
-| `/cap name 500G` | Change cap |
+| `/add name cap=2T reset=27` | Add to coverage; `reset=27T08:00:00` for seconds |
+| `/cap name 500G` | Change cap; cap+reset arms 90% cutoff |
+| `/reset name 27` | Change the reset instant in the host timezone |
 | `/off` `/on` | Disable / enable (still listed) |
 | `/kick name` | Remove; needs `/add` to return |
 | 中文 / English or `/lang zh` `/lang en` | Switch bot language |
@@ -133,8 +148,9 @@ See `traffic-monitor.env.example`. Do not commit a filled-in copy.
 | `NODE_NAME` | `[a-z][a-z0-9-]{0,31}` |
 | `TRAFFIC_IFACE` | Accounting NIC |
 | `HOST_LABEL` | Name shown in Telegram; empty uses `NODE_NAME`, then hostname |
-| `BILLING_RESET_DAY` | UTC monthly reset day |
-| `MONTHLY_CAP_BYTES` | Cap in bytes; `0` means unlimited |
+| `BILLING_RESET_DAY` | Reset day in the host timezone (1–31) |
+| `BILLING_RESET_TIME` | Local `HH[:MM[:SS]]` that day; omitted fields are 0 |
+| `MONTHLY_CAP_BYTES` | Cap in bytes; `0` means unlimited and no cutoff |
 | `DAILY_REPORT_HOUR_UTC` | Daily summary hour |
 | `HUB_BIND` / `HUB_PORT` | Hub listen address |
 | `HUB_URL` | Bot to local hub, usually `https://127.0.0.1:8788` |
@@ -151,5 +167,6 @@ See `traffic-monitor.env.example`. Do not commit a filled-in copy.
 | `traffic-bot` | 56M | hub only |
 | `traffic-agent` | 96M | agent only |
 | `traffic-monitor.timer` | 48M oneshot | daily report |
+| `traffic-cut` | 32M oneshot | Cap cutoff (root, nft) |
 
 State directory: `/var/lib/traffic-monitor`. Code installs to `/opt/traffic-monitor`.

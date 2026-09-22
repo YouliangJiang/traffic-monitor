@@ -7,24 +7,14 @@ import os
 import socket
 import ssl
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from report import fmt_bytes, h, host_label, progress_bar, utcnow
+from report import utcnow
 
 import i18n
-
-CST = timezone(timedelta(hours=8))
-
-
-@dataclass
-class ProcUse:
-    comm: str
-    rss: int
-    cpu_pct: float = 0.0
-
 
 @dataclass
 class HostInfo:
@@ -36,7 +26,6 @@ class HostInfo:
     load15: float
     cpu_pct: float
     steal_pct: float
-    iowait_pct: float
     mem_total: int
     mem_available: int
     swap_total: int
@@ -48,10 +37,6 @@ class HostInfo:
     net_tx_bps: float
     net_window_sec: float
     uptime_sec: float
-    xray_ok: bool
-    xray_rss: int
-    top_rss: list[ProcUse] = field(default_factory=list)
-    top_cpu: list[ProcUse] = field(default_factory=list)
 
 
 def fmt_duration(seconds: float) -> str:
@@ -326,23 +311,37 @@ def _pct(delta: int, total: int) -> float:
 
 
 
-def tcp_port_open(port: int, timeout: float = 0.4) -> bool:
-    port = int(port)
-    for host in ("127.0.0.1", "::1"):
+def listening_ports() -> set[int]:
+    """TCP ports in LISTEN state, any local address, from /proc/net/tcp{,6}."""
+    found: set[int] = set()
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
-            with socket.create_connection((host, port), timeout):
-                return True
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
         except OSError:
             continue
-    return False
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) < 4 or parts[3] != "0A":
+                continue
+            _addr, _sep, hexport = parts[1].rpartition(":")
+            try:
+                found.add(int(hexport, 16))
+            except ValueError:
+                continue
+    return found
 
 
-def proc_rss_by_comm(comm: str) -> int:
+def tcp_port_open(port: int, timeout: float = 0.4, listening: Optional[set[int]] = None) -> bool:
+    ports = listening if listening is not None else listening_ports()
+    return int(port) in ports
+
+
+def _rss_in_sample(procs: dict[int, tuple[str, int, int]], comm: str) -> int:
     want = (comm or "").strip()[:18]
     if not want:
         return 0
     total = 0
-    for _pid, (name, rss, _cpu) in _proc_sample().items():
+    for _pid, (name, rss, _cpu) in procs.items():
         if name == want:
             total += rss
     return total
@@ -350,52 +349,34 @@ def proc_rss_by_comm(comm: str) -> int:
 
 def probe_services(specs: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    listening = listening_ports()
+    procs = _proc_sample()
     for spec in specs or []:
         ports = []
         all_ok = True
         for port in spec.get("ports") or []:
-            ok = tcp_port_open(int(port))
+            ok = tcp_port_open(int(port), listening=listening)
             ports.append({"port": int(port), "ok": ok})
             if not ok:
                 all_ok = False
         if not ports:
             all_ok = False
-        rss = proc_rss_by_comm(str(spec.get("proc") or spec.get("name") or ""))
+        rss = _rss_in_sample(procs, str(spec.get("proc") or spec.get("name") or ""))
         out.append({"name": spec.get("name"), "ports": ports, "ok": all_ok, "rss": rss})
     return out
 
 
 def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
     cpu1 = _read_cpu_times()
-    procs1 = _proc_sample()
     time.sleep(interval)
     cpu2 = _read_cpu_times()
-    procs2 = _proc_sample()
     rx_bps, tx_bps, net_window_sec = iface_bitrate(iface)
-
     cpu_total = cpu2[0] - cpu1[0]
     cpu_pct = 100.0 - _pct(cpu2[1] - cpu1[1], cpu_total)
-    iowait_pct = _pct(cpu2[2] - cpu1[2], cpu_total)
     steal_pct = _pct(cpu2[3] - cpu1[3], cpu_total)
-
-    cpu_rows: list[ProcUse] = []
-    rss_rows: list[ProcUse] = []
-    for pid, (comm, rss, cpu_now) in procs2.items():
-        rss_rows.append(ProcUse(comm=comm, rss=rss))
-        prev = procs1.get(pid)
-        if prev is None:
-            continue
-        cpu_rows.append(ProcUse(comm=comm, rss=rss, cpu_pct=_pct(cpu_now - prev[2], cpu_total)))
-    rss_rows.sort(key=lambda item: item.rss, reverse=True)
-    cpu_rows.sort(key=lambda item: item.cpu_pct, reverse=True)
-
     mem = _read_meminfo()
     load1, load5, load15, nproc = _read_load()
     disk_total, disk_used, disk_avail = _disk("/")
-    xray_rss = 0
-    for item in rss_rows:
-        if item.comm == "xray":
-            xray_rss += item.rss
     try:
         hostname = Path("/proc/sys/kernel/hostname").read_text(encoding="utf-8").strip()
     except OSError:
@@ -409,7 +390,6 @@ def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
         load15=load15,
         cpu_pct=cpu_pct,
         steal_pct=steal_pct,
-        iowait_pct=iowait_pct,
         mem_total=int(mem.get("MemTotal") or 0),
         mem_available=int(mem.get("MemAvailable") or 0),
         swap_total=int(mem.get("SwapTotal") or 0),
@@ -421,135 +401,4 @@ def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
         net_tx_bps=tx_bps,
         net_window_sec=net_window_sec,
         uptime_sec=_read_uptime(),
-        xray_ok=bool(xray_rss),
-        xray_rss=xray_rss,
-        top_rss=rss_rows[:5],
-        top_cpu=cpu_rows[:5],
-    )
-
-
-def _top_lines(rows: list[ProcUse], kind: str) -> str:
-    if not rows:
-        return i18n.t("host.none")
-    lines = []
-    for item in rows:
-        if kind == "rss":
-            lines.append(f"  {item.comm:<18} {fmt_mib(item.rss):>8}")
-        else:
-            lines.append(f"  {item.comm:<18} {item.cpu_pct:5.1f}%")
-    return "\n".join(lines)
-
-
-def format_cpu(info: HostInfo) -> str:
-    return i18n.t(
-        "host.cpu",
-        name=h(host_label()),
-        pct=info.cpu_pct,
-        bar=progress_bar(info.cpu_pct),
-        steal=info.steal_pct,
-        iowait=info.iowait_pct,
-        nproc=info.nproc,
-        load1=info.load1,
-        load5=info.load5,
-        load15=info.load15,
-        top_title=i18n.t("host.top_cpu"),
-        top=_top_lines(info.top_cpu, "cpu"),
-    )
-
-
-def format_mem(info: HostInfo) -> str:
-    used = max(0, info.mem_total - info.mem_available)
-    pct = 100.0 * used / info.mem_total if info.mem_total else 0.0
-    swap_used = max(0, info.swap_total - info.swap_free)
-    swap_pct = 100.0 * swap_used / info.swap_total if info.swap_total else 0.0
-    return i18n.t(
-        "host.mem",
-        name=h(host_label()),
-        used=fmt_mib(used),
-        total=fmt_mib(info.mem_total),
-        pct=pct,
-        bar=progress_bar(pct),
-        avail=fmt_mib(info.mem_available),
-        swap_used=fmt_mib(swap_used),
-        swap_total=fmt_mib(info.swap_total),
-        swap_pct=swap_pct,
-        top_title=i18n.t("host.top_rss"),
-        top=_top_lines(info.top_rss, "rss"),
-    )
-
-
-def format_disk(info: HostInfo) -> str:
-    pct = 100.0 * info.disk_used / info.disk_total if info.disk_total else 0.0
-    return i18n.t(
-        "host.disk",
-        name=h(host_label()),
-        used=fmt_bytes(info.disk_used),
-        total=fmt_bytes(info.disk_total),
-        pct=pct,
-        bar=progress_bar(pct),
-        avail=fmt_bytes(info.disk_avail),
-    )
-
-
-def format_net(info: HostInfo, iface: str) -> str:
-    return i18n.t(
-        "host.net",
-        name=h(host_label()),
-        iface=h(iface),
-        rx=h(fmt_bps(info.net_rx_bps)),
-        tx=h(fmt_bps(info.net_tx_bps)),
-    )
-
-
-def format_uptime(info: HostInfo) -> str:
-    local = info.now.astimezone(CST).strftime("%Y-%m-%d %H:%M:%S")
-    return i18n.t(
-        "host.uptime",
-        name=h(host_label()),
-        uptime=h(fmt_duration(info.uptime_sec)),
-        hostname=h(info.hostname),
-        local=h(local),
-    )
-
-
-def format_xray(info: HostInfo) -> str:
-    port = i18n.t("metric.xray_ok") if info.xray_ok else i18n.t("metric.xray_down")
-    mark = "✅" if info.xray_ok else "❌"
-    rss = fmt_mib(info.xray_rss) if info.xray_rss else i18n.t("host.no_proc")
-    return i18n.t(
-        "host.xray",
-        name=h(host_label()),
-        mark=mark,
-        port=h(port),
-        rss=h(rss),
-    )
-
-
-def format_overview(info: HostInfo, traffic_line: str, iface: str) -> str:
-    used = max(0, info.mem_total - info.mem_available)
-    mem_pct = 100.0 * used / info.mem_total if info.mem_total else 0.0
-    disk_pct = 100.0 * info.disk_used / info.disk_total if info.disk_total else 0.0
-    local = info.now.astimezone(CST).strftime("%m-%d %H:%M")
-    xray = "healthy" if info.xray_ok else "down"
-    return i18n.t(
-        "host.overview",
-        name=h(host_label()),
-        local=h(local),
-        cpu=info.cpu_pct,
-        cpu_bar=progress_bar(info.cpu_pct, 12),
-        load=info.load1,
-        mem_used=fmt_mib(used),
-        mem_total=fmt_mib(info.mem_total),
-        mem_bar=progress_bar(mem_pct, 12),
-        swap=fmt_mib(max(0, info.swap_total - info.swap_free)),
-        disk_pct=disk_pct,
-        disk_bar=progress_bar(disk_pct, 12),
-        disk_avail=fmt_bytes(info.disk_avail),
-        rx=h(fmt_bps(info.net_rx_bps)),
-        tx=h(fmt_bps(info.net_tx_bps)),
-        iface=h(iface),
-        xray=h(xray),
-        rss=h(fmt_mib(info.xray_rss) if info.xray_rss else "n/a"),
-        uptime=h(fmt_duration(info.uptime_sec)),
-        traffic=traffic_line,
     )

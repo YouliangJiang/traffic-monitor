@@ -75,27 +75,6 @@ def fleet_overview(rows: list[dict[str, Any]], title: Optional[str] = None) -> s
     )
 
 
-def node_list(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return i18n.t("fleet.coverage_empty")
-    lines = []
-    for row in rows:
-        cap = util.format_cap(row.get("cap_bytes"))
-        mark = "●" if row.get("online") else "○"
-        flag = "" if row.get("enabled", True) else i18n.t("fleet.disabled_flag")
-        lines.append(
-            i18n.t(
-                "fleet.coverage_line",
-                mark=mark,
-                name=report.h(row["name"]),
-                cap=report.h(cap),
-                reset=int(row.get("reset_day") or 1),
-                flag=flag,
-            )
-        )
-    return f"{i18n.t('fleet.coverage_title')}\n\n" + "\n".join(lines) + "\n\n" + i18n.t("fleet.coverage_hint")
-
-
 
 def _svc_specs(row: dict[str, Any]) -> list[dict[str, Any]]:
     return list(row.get("svc") or [])
@@ -159,12 +138,13 @@ def svc_block(row: dict[str, Any], svc_name: str) -> str:
     )
 
 
-def first_svc_name(row: dict[str, Any], prefer: str = "xray") -> str:
+def first_svc_name(row: dict[str, Any]) -> str:
     specs = _svc_specs(row)
-    names = [str(s.get("name") or "") for s in specs if s.get("name")]
-    if prefer in names:
-        return prefer
-    return names[0] if names else ""
+    for spec in specs:
+        name = str(spec.get("name") or "")
+        if name:
+            return name
+    return ""
 
 def node_detail(row: dict[str, Any]) -> str:
     snap = row.get("snapshot") or {}
@@ -189,7 +169,15 @@ def node_detail(row: dict[str, Any]) -> str:
             ]
         )
         bar = f"{report.progress_bar(pct or 0)} {(pct or 0):.1f}%\n"
-        cap_note = i18n.t("node.in_plan") if (pct or 0) < 100 else i18n.t("node.over_plan")
+        cut_info = snap.get("cut") or {}
+        if not row.get("reset_set", True):
+            cap_note = i18n.t("node.cut_needs_reset")
+        elif cut_info.get("applied") == "cut" or cut_info.get("want") == "cut":
+            cap_note = i18n.t("node.cut_active")
+        elif (pct or 0) < 100:
+            cap_note = i18n.t("node.in_plan")
+        else:
+            cap_note = i18n.t("node.over_plan")
     else:
         table = "\n".join(
             [
@@ -213,10 +201,14 @@ def node_detail(row: dict[str, Any]) -> str:
         + i18n.t(
             "node.meta",
             period=i18n.t("node.period"),
-            start=report.h(snap.get("period_start")),
-            end=report.h(snap.get("period_end")),
+            start=report.h(report.fmt_period_bound(snap.get("period_start"))),
+            end=report.h(report.fmt_period_bound(snap.get("period_end"))),
             reset_label=i18n.t("node.reset"),
-            reset=int(row.get("reset_day") or 1),
+            reset=report.h(
+                i18n.t("node.reset_unset")
+                if not row.get("reset_set", True)
+                else util.format_reset(int(row.get("reset_day") or 1), str(row.get("reset_time") or snap.get("reset_time") or "00:00:00"))
+            ),
             nic=i18n.t("node.nic"),
             iface=report.h(row.get("iface") or snap.get("iface")),
         )
@@ -314,16 +306,6 @@ def metric_block(row: dict[str, Any], kind: str) -> str:
 def nic_result(name: str, data: dict[str, Any], row: Optional[dict[str, Any]] = None) -> str:
     seconds = float(data.get("seconds") or 0)
     iface = str(data.get("iface") or (row or {}).get("iface") or "eth0")
-    snap = (row or {}).get("snapshot") or {}
-    window = float(snap.get("net_window_sec") or 0)
-    avg = ""
-    if window >= 1:
-        avg = i18n.t(
-            "nic.avg",
-            sec=window,
-            rx=hostinfo.fmt_bps(float(snap.get("net_rx_bps") or 0)),
-            tx=hostinfo.fmt_bps(float(snap.get("net_tx_bps") or 0)),
-        )
     return (
         i18n.t("nic.title", name=report.h(name), seconds=seconds, iface=report.h(iface))
         + "\n\n<pre>"
@@ -338,7 +320,7 @@ def nic_result(name: str, data: dict[str, Any], row: Optional[dict[str, Any]] = 
             bps=hostinfo.fmt_bps(float(data.get("tx_bps") or 0)),
             nbytes=report.fmt_bytes(int(data.get("tx_bytes") or 0)),
         )
-        + f"</pre>{avg}\n"
+        + "</pre>\n"
         + i18n.t("nic.hint")
     )
 
@@ -374,11 +356,11 @@ def bw_result(name: str, data: dict[str, Any]) -> str:
     )
 
 
-def add_help(name: str, hub_url: str, cap_text: str, reset_day: int) -> str:
+def add_help(name: str, hub_url: str, cap_text: str, reset_day: int, reset_time: str = "00:00:00") -> str:
     return i18n.t(
         "add.done",
         name=report.h(name),
         cap=report.h(cap_text),
-        reset=reset_day,
+        reset=report.h(util.format_reset(reset_day, reset_time)),
         hub=report.h(hub_url),
     )

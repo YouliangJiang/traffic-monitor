@@ -2,6 +2,7 @@
 """Low-memory Lightsail traffic reporter. Stdlib only, oneshot-friendly."""
 from __future__ import annotations
 
+import calendar
 import html
 import http.client
 import json
@@ -19,9 +20,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 import i18n
+import util
 
 UTC = timezone.utc
-THRESHOLDS = (50, 70, 85, 95, 100)
+THRESHOLDS = (80,)
 PROJECTION_COOLDOWN = timedelta(hours=24)
 
 
@@ -39,15 +41,14 @@ class DayBytes:
 @dataclass
 class Snapshot:
     iface: str
-    period_start: date
-    period_end: date
+    period_start: datetime
+    period_end: datetime
     period_key: str
     now: datetime
     today: DayBytes
     period_rx: int
     period_tx: int
-    vnstat_ok: bool
-    xray_ok: bool
+    ledger_ok: bool
     bootstrap_applied: bool
     days: list[DayBytes]
     rate_period: float
@@ -59,57 +60,48 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def env(name: str, default: Optional[str] = None) -> str:
-    value = os.environ.get(name, default)
-    if value is None or value == "":
-        raise SystemExit(f"missing environment variable {name}")
-    return value
 
 
-def env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    return int(raw)
+def reset_datetime(year: int, month: int, reset_day: int, reset_time: str = "00:00:00") -> datetime:
+    last = calendar.monthrange(year, month)[1]
+    day = min(max(1, int(reset_day or 1)), last)
+    hour, minute, second = (int(x) for x in util.parse_reset_time(reset_time).split(":"))
+    return datetime(year, month, day, hour, minute, second, tzinfo=util.local_tz())
 
 
-def state_dir() -> Path:
-    raw = os.environ.get("STATE_DIRECTORY") or os.environ.get("TRAFFIC_MONITOR_STATE_DIR")
-    if raw:
-        return Path(raw.split(":")[0])
-    return Path("/var/lib/traffic-monitor")
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
-def billing_period(now: datetime, reset_day: int) -> tuple[date, date]:
-    today = now.date()
-    if today.day >= reset_day:
-        start = date(today.year, today.month, reset_day)
+def billing_period(
+    now: datetime, reset_day: int, reset_time: str = "00:00:00"
+) -> tuple[datetime, datetime]:
+    tz = util.local_tz()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=tz)
     else:
-        year, month = today.year, today.month - 1
-        if month == 0:
-            year, month = year - 1, 12
-        start = date(year, month, reset_day)
-    end_year, end_month = start.year, start.month + 1
-    if end_month == 13:
-        end_year, end_month = end_year + 1, 1
-    end = date(end_year, end_month, reset_day) - timedelta(days=1)
+        now = now.astimezone(tz)
+    this = reset_datetime(now.year, now.month, reset_day, reset_time)
+    if now >= this:
+        start = this
+        year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+        end = reset_datetime(year, month, reset_day, reset_time)
+    else:
+        year, month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+        start = reset_datetime(year, month, reset_day, reset_time)
+        end = this
     return start, end
+
+
+def fmt_period_bound(value: Any) -> str:
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo else value.replace(tzinfo=util.local_tz())
+    else:
+        parsed = parse_iso_datetime(value)
+        if parsed is None:
+            text = str(value or "")
+            if len(text) >= 10 and text[4] == "-":
+                return text[:10]
+            return text
+    if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
+        return parsed.date().isoformat()
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def fmt_bytes(n: int) -> str:
@@ -138,32 +130,6 @@ def fmt_gb(n: int) -> str:
     """Right-aligned GB for <pre> columns, e.g. '   0.00 GB' or ' 426.13 GB'."""
     return f"{fmt_gb_num(n)} GB"
 
-
-def pre_traffic_table(snap: Snapshot, cap: int, include_today: bool = True) -> str:
-    """Monospace table. CJK labels are the same width; numbers share one GB column."""
-    used = snap.period_rx + snap.period_tx
-    pct = (used / cap * 100.0) if cap else 0.0
-    cap_gb = int(round(cap / 1_000_000_000))
-    lines: list[str] = []
-    if include_today:
-        lines.extend(
-            [
-                i18n.t("report.today"),
-                i18n.t("pre.row_in", label=i18n.t("report.in"), value=fmt_gb(snap.today.rx)),
-                i18n.t("pre.row_out", label=i18n.t("report.out"), value=fmt_gb(snap.today.tx)),
-                i18n.t("pre.row_total", label=i18n.t("report.total"), value=fmt_gb(snap.today.total)),
-            ]
-        )
-    lines.extend(
-        [
-            i18n.t("report.period"),
-            i18n.t("pre.row_in", label=i18n.t("report.in"), value=fmt_gb(snap.period_rx)),
-            i18n.t("pre.row_out", label=i18n.t("report.out"), value=fmt_gb(snap.period_tx)),
-            i18n.t("pre.row_total", label=i18n.t("report.total"), value=fmt_gb(used)),
-            i18n.t("report.quota", used=fmt_gb_num(used), cap=cap_gb, pct=pct),
-        ]
-    )
-    return "<pre>" + "\n".join(lines) + "</pre>"
 
 
 def progress_bar(pct: float, width: int = 16) -> str:
@@ -224,11 +190,18 @@ def _tg_conn_get(timeout: int) -> http.client.HTTPSConnection:
     return conn
 
 
+def _tg_exchange(conn: http.client.HTTPSConnection, http_method: str, path: str, data: bytes, headers: dict[str, str]) -> tuple[int, str]:
+    conn.request(http_method, path, body=data or None, headers=headers)
+    resp = conn.getresponse()
+    return int(resp.status), resp.read().decode("utf-8", errors="replace")
+
+
 def telegram_call(
     token: str,
     method: str,
     payload: Optional[dict[str, Any]] = None,
     timeout: int = 20,
+    shared: bool = True,
 ) -> dict[str, Any]:
     path = f"/bot{token}/{method}"
     data = b"" if payload is None else json.dumps(payload).encode("utf-8")
@@ -238,18 +211,29 @@ def telegram_call(
     status = 0
     last_exc: Optional[Exception] = None
     for _attempt in range(2):
-        with _tg_lock:
+        if shared:
+            with _tg_lock:
+                try:
+                    conn = _tg_conn_get(timeout)
+                    status, raw = _tg_exchange(conn, http_method, path, data, headers)
+                    last_exc = None
+                    break
+                except (OSError, http.client.HTTPException, TimeoutError) as exc:
+                    last_exc = exc
+                    _tg_close()
+            continue
+        conn = http.client.HTTPSConnection("api.telegram.org", timeout=timeout, context=_tg_ctx)
+        try:
+            status, raw = _tg_exchange(conn, http_method, path, data, headers)
+            last_exc = None
+            break
+        except (OSError, http.client.HTTPException, TimeoutError) as exc:
+            last_exc = exc
+        finally:
             try:
-                conn = _tg_conn_get(timeout)
-                conn.request(http_method, path, body=data or None, headers=headers)
-                resp = conn.getresponse()
-                status = int(resp.status)
-                raw = resp.read().decode("utf-8", errors="replace")
-                last_exc = None
-                break
-            except (OSError, http.client.HTTPException, TimeoutError) as exc:
-                last_exc = exc
-                _tg_close()
+                conn.close()
+            except OSError:
+                pass
     if last_exc is not None:
         raise RuntimeError(f"telegram {method}: {last_exc}") from last_exc
     if status >= 400:
@@ -272,13 +256,6 @@ def read_boot_id() -> str:
         return ""
 
 
-def tcp_443_open() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 443), 2):
-            return True
-    except OSError:
-        return False
-
 
 def parse_iso_date(raw: Any) -> Optional[date]:
     if not raw:
@@ -298,36 +275,29 @@ def parse_iso_datetime(raw: Any) -> Optional[datetime]:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        parsed = parsed.replace(tzinfo=util.local_tz())
+    return parsed
 
 
-def bootstrap_extra(bootstrap: dict[str, Any], period_start: date, period_end: date) -> tuple[int, int, bool]:
+def bootstrap_extra(
+    bootstrap: dict[str, Any], period_start: datetime, period_end: datetime
+) -> tuple[int, int, bool]:
     captured = parse_iso_datetime(bootstrap.get("captured_at"))
     boot_time = parse_iso_datetime(bootstrap.get("boot_time"))
     if captured is None or boot_time is None:
         return 0, 0, False
-    if not (period_start <= captured.date() <= period_end):
+    if not isinstance(period_start, datetime) or not isinstance(period_end, datetime):
         return 0, 0, False
-    if boot_time.date() < period_start:
+    # The bootstrap counter is one lump from boot until install. Count it only when
+    # that whole span sits inside this period. A boot that started before the reset
+    # instant cannot be split, so it is left out instead of charging the previous period.
+    if not (period_start <= captured < period_end):
+        return 0, 0, False
+    if boot_time < period_start:
         return 0, 0, False
     return int(bootstrap.get("rx_bytes") or 0), int(bootstrap.get("tx_bytes") or 0), True
 
 
-def sum_days(days: list[DayBytes], start: date, end: date) -> tuple[int, int]:
-    rx = tx = 0
-    for item in days:
-        if start <= item.day <= end:
-            rx += item.rx
-            tx += item.tx
-    return rx, tx
-
-
-def today_bytes(days: list[DayBytes], today: date) -> DayBytes:
-    for item in days:
-        if item.day == today:
-            return item
-    return DayBytes(day=today, rx=0, tx=0)
 
 
 def daily_rate(days: list[DayBytes], today: date, period_rx: int, period_tx: int, period_start: date) -> float:
@@ -346,42 +316,47 @@ def collect_snapshot(
     reset_day: int,
     bootstrap: dict[str, Any],
     now: Optional[datetime] = None,
-    end_override: Optional[date] = None,
+    reset_time: str = "00:00:00",
 ) -> Snapshot:
     now = now or utcnow()
-    period_start, period_end = billing_period(now, reset_day)
-    if end_override is not None:
-        period_end = end_override
+    period_start, period_end = billing_period(now, reset_day, reset_time)
     try:
         import counters
 
-        raw_days = counters.record_sample(iface, now)
-        days = [DayBytes(day=day, rx=rx, tx=tx) for day, rx, tx in raw_days]
-        traffic_ok = True
+        counters.record_sample(iface, now)
+        ledger_ok = True
+        rx, tx = counters.sum_between(period_start, period_end)
+        local_now = now if now.tzinfo else now.replace(tzinfo=util.local_tz())
+        local_now = local_now.astimezone(util.local_tz())
+        today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_rx, today_tx = counters.sum_between(today_start, today_start + timedelta(days=1))
+        days = [DayBytes(day=day, rx=drx, tx=dtx) for day, drx, dtx in counters.day_rows()]
     except Exception:
         days = []
-        traffic_ok = False
-    rx, tx = sum_days(days, period_start, period_end)
+        ledger_ok = False
+        rx = tx = 0
+        today_rx = today_tx = 0
+    start_d = period_start.date()
+    end_d = (period_end - timedelta(microseconds=1)).date()
     extra_rx, extra_tx, applied = bootstrap_extra(bootstrap, period_start, period_end)
     rx += extra_rx
     tx += extra_tx
-    today = today_bytes(days, now.date())
-    elapsed_days = max(1, (min(now.date(), period_end) - period_start).days + 1)
+    today = DayBytes(day=now.date(), rx=today_rx, tx=today_tx)
+    elapsed_days = max(1, int((min(now, period_end) - period_start).total_seconds() // 86400) + 1)
     rate_period = (rx + tx) / elapsed_days
-    rate_recent = daily_rate(days, min(now.date(), period_end), rx, tx, period_start)
-    days_left = max(0, (period_end - now.date()).days)
+    rate_recent = daily_rate(days, min(now.date(), end_d), rx, tx, start_d)
+    days_left = max(0, int((period_end - now).total_seconds() // 86400))
     projected = int(rx + tx + rate_recent * days_left)
     return Snapshot(
         iface=iface,
         period_start=period_start,
         period_end=period_end,
-        period_key=period_start.isoformat(),
+        period_key=period_start.strftime("%Y-%m-%dT%H:%M:%S"),
         now=now,
         today=today,
         period_rx=rx,
         period_tx=tx,
-        vnstat_ok=traffic_ok,
-        xray_ok=False,
+        ledger_ok=ledger_ok,
         bootstrap_applied=applied,
         days=days,
         rate_period=rate_period,
@@ -391,83 +366,8 @@ def collect_snapshot(
 
 
 
-def _local_svc_specs() -> list:
-    import util
-
-    inv = load_json(state_dir() / "inventory.json")
-    node = util.normalize_node_name(os.environ.get("NODE_NAME") or "")
-    rec = (inv.get("nodes") or {}).get(node) or {}
-    return util.normalize_svc_list(rec.get("svc"))
 
 
-def period_lines(snap: Snapshot, cap: int, include_today: bool = True) -> str:
-    used = snap.period_rx + snap.period_tx
-    pct = (used / cap * 100.0) if cap else 0.0
-    remaining = cap - used
-    elapsed_days = max(1, (min(snap.now.date(), snap.period_end) - snap.period_start).days + 1)
-    days_left = max(0, (snap.period_end - snap.now.date()).days)
-    if snap.bootstrap_applied:
-        source = i18n.t("report.src_boot")
-    elif snap.vnstat_ok:
-        source = i18n.t("report.src_ok")
-    else:
-        source = i18n.t("report.src_fail")
-    cap_note = i18n.t("report.over") if used >= cap else i18n.t("report.in_plan")
-    body = (
-        i18n.t("report.cycle", start=h(snap.period_start.isoformat()), end=h(snap.period_end.isoformat()))
-        + "\n"
-        + i18n.t("report.host", host=h(host_label()), iface=h(snap.iface))
-        + "\n"
-        + i18n.t("report.source", source=h(source))
-        + "\n\n"
-        + f"{pre_traffic_table(snap, cap, include_today=include_today)}\n"
-        + f"{progress_bar(pct)} {pct:.1f}%\n\n"
-        + i18n.t("report.avg_period", rate=h(fmt_bytes(int(snap.rate_period))), elapsed=elapsed_days, left=days_left)
-        + "\n"
-        + i18n.t("report.avg_3d", rate=h(fmt_bytes(int(snap.rate_recent))))
-        + "\n"
-        + i18n.t("report.projected", value=h(fmt_bytes(int(snap.projected))))
-        + "\n"
-        + i18n.t("report.remain_cap", value=h(fmt_bytes(remaining)))
-        + "\n"
-        + cap_note
-        + "\n"
-    )
-    specs = _local_svc_specs()
-    if specs:
-        import hostinfo
-
-        results = hostinfo.probe_services(specs)
-        bits = []
-        for item in results:
-            ports = " ".join(
-                ("✅" if p.get("ok") else "❌") + str(p.get("port")) for p in (item.get("ports") or [])
-            )
-            bits.append(f"{item.get('name')} {ports}")
-        if bits:
-            body += "\n" + i18n.t("report.svc", detail=" · ".join(bits))
-    return body
-
-
-def build_status_message(
-    title: str, snap: Snapshot, cap: int, extra: str = "", include_today: bool = True
-) -> str:
-    body = (
-        f"{title}\n\n"
-        f"{period_lines(snap, cap, include_today=include_today)}"
-    )
-    if extra:
-        body += "\n" + extra
-    return body
-
-
-def crossed_thresholds(prev: list[int], pct: float) -> list[int]:
-    have = set(int(x) for x in prev)
-    newly = []
-    for mark in THRESHOLDS:
-        if pct >= mark and mark not in have:
-            newly.append(mark)
-    return newly
 
 
 def send_telegram(token: str, chat_id: str, text: str) -> None:
@@ -487,133 +387,5 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
     raise SystemExit(f"telegram send failed: {last_error}")
 
 
-def previous_period_snapshot(
-    iface: str,
-    reset_day: int,
-    bootstrap: dict[str, Any],
-    old_key: str,
-) -> Optional[Snapshot]:
-    try:
-        start = date.fromisoformat(old_key)
-    except ValueError:
-        return None
-    end_year, end_month = start.year, start.month + 1
-    if end_month == 13:
-        end_year, end_month = end_year + 1, 1
-    end = date(end_year, end_month, reset_day) - timedelta(days=1)
-    fake_now = datetime(end.year, end.month, end.day, 23, 59, tzinfo=UTC)
-    return collect_snapshot(iface, reset_day, bootstrap, now=fake_now, end_override=end)
 
 
-def main() -> int:
-    iface = os.environ.get("TRAFFIC_IFACE", "eth0")
-    reset_day = env_int("BILLING_RESET_DAY", 27)
-    cap = env_int("MONTHLY_CAP_BYTES", 2_000_000_000_000)
-    daily_hour = env_int("DAILY_REPORT_HOUR_UTC", 16)
-    token = env("TELEGRAM_BOT_TOKEN")
-    chat_id = env("TELEGRAM_CHAT_ID")
-    dry_run = os.environ.get("TRAFFIC_MONITOR_DRY_RUN") == "1"
-    force = os.environ.get("TRAFFIC_MONITOR_FORCE") == "1"
-
-    state_path = state_dir() / "state.json"
-    bootstrap_path = state_dir() / "bootstrap.json"
-    state = load_json(state_path)
-    bootstrap = load_json(bootstrap_path)
-    snap = collect_snapshot(iface, reset_day, bootstrap)
-
-    used = snap.period_rx + snap.period_tx
-    pct = (used / cap * 100.0) if cap else 0.0
-    days_left = max(0, (snap.period_end - snap.now.date()).days)
-    projected = snap.projected
-    print(
-        f"traffic-monitor period={snap.period_key} used={used} pct={pct:.1f} "
-        f"traffic={int(snap.vnstat_ok)} bootstrap={int(snap.bootstrap_applied)} "
-        f"maxrss_kb={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
-        flush=True,
-    )
-
-    if state.get("period_key") != snap.period_key:
-        old_key = state.get("period_key")
-        if old_key:
-            prev = previous_period_snapshot(iface, reset_day, bootstrap, str(old_key))
-            if prev is not None:
-                msg = build_status_message(
-                    i18n.t("report.close", host=h(host_label())),
-                    prev,
-                    cap,
-                    include_today=False,
-                )
-                if dry_run:
-                    print(msg)
-                else:
-                    send_telegram(token, chat_id, msg)
-        state["period_key"] = snap.period_key
-        state["fired_thresholds"] = []
-        state["last_projection_sent_at"] = None
-        state["last_daily_sent"] = None
-
-    messages: list[str] = []
-    extra_bits: list[str] = []
-    vnstat_note = ""
-    if not snap.vnstat_ok:
-        vnstat_note = i18n.t("report.ledger_fail")
-    boot_id = read_boot_id()
-    if state.get("boot_id") and state["boot_id"] != boot_id:
-        extra_bits.append(i18n.t("report.reboot"))
-    state["boot_id"] = boot_id
-
-    prev_marks = [int(x) for x in state.get("fired_thresholds") or []]
-    newly = crossed_thresholds(prev_marks, pct)
-    if newly:
-        marks = i18n.t("sep.list").join(f"{mark}%" for mark in newly)
-        extra_bits.append(i18n.t("report.crossed", marks=h(marks)))
-        state["fired_thresholds"] = sorted(set(prev_marks + newly))
-
-    last_proj = parse_iso_datetime(state.get("last_projection_sent_at"))
-    if used < cap and projected > cap:
-        if last_proj is None or snap.now - last_proj >= PROJECTION_COOLDOWN:
-            extra_bits.append(
-                i18n.t(
-                    "report.projection",
-                    projected=h(fmt_bytes(int(projected))),
-                    left=days_left,
-                    budget=h(fmt_bytes(int(max(0, cap - used) / max(1, days_left)))),
-                )
-            )
-            state["last_projection_sent_at"] = snap.now.isoformat()
-
-    extra = "\n".join([bit for bit in (vnstat_note, *extra_bits) if bit])
-    startup_sent = bool(state.get("startup_sent"))
-    last_daily = str(state.get("last_daily_sent") or "")
-    today_s = snap.now.date().isoformat()
-    daily_due = snap.now.hour >= daily_hour and last_daily != today_s
-
-    if not startup_sent or force:
-        messages.append(
-            build_status_message(i18n.t("report.startup", host=h(host_label())), snap, cap, extra)
-        )
-        state["startup_sent"] = True
-        if snap.now.hour >= daily_hour:
-            state["last_daily_sent"] = today_s
-    elif daily_due:
-        messages.append(build_status_message(i18n.t("report.daily", host=h(host_label())), snap, cap, extra))
-        state["last_daily_sent"] = today_s
-    elif extra_bits:
-        messages.append(build_status_message(i18n.t("report.alert", host=h(host_label())), snap, cap, extra))
-
-    if dry_run:
-        for msg in messages:
-            print(msg)
-            print("---")
-        print(json.dumps({"used": used, "pct": round(pct, 2), "period": snap.period_key}, ensure_ascii=False))
-        return 0
-
-    for msg in messages:
-        send_telegram(token, chat_id, msg)
-
-    save_json(state_path, state)
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -89,6 +89,8 @@ def as_https(url: str, default_host: str = "127.0.0.1", default_port: int = 8788
 def ensure_hub_cert(dns_names: list[str], ip_names: list[str]) -> tuple[Path, Path]:
     crt, key = cert_paths()
     crt.parent.mkdir(parents=True, exist_ok=True)
+    if crt.is_file() and key.is_file():
+        return crt, key
     alt_lines = [f"DNS.{i} = {name}" for i, name in enumerate(dns_names, start=1)]
     alt_lines += [f"IP.{i} = {name}" for i, name in enumerate(ip_names, start=1)]
     config = "\n".join(

@@ -8,6 +8,7 @@ import re
 import ssl
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,6 +16,11 @@ NODE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAX_SVC = 4
 MAX_SVC_PORTS = 8
 CAP_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmgt]i?b?)?$", re.I)
+
+
+def local_tz():
+    """Timezone configured on this host (/etc/localtime)."""
+    return datetime.now().astimezone().tzinfo
 
 
 def env(name: str, default: Optional[str] = None) -> str:
@@ -64,6 +70,64 @@ def valid_node_name(name: str) -> bool:
 
 def normalize_node_name(name: str) -> str:
     return (name or "").strip().lower()
+
+
+def parse_reset_time(text: str) -> str:
+    """HH, HH:MM, or HH:MM:SS. Omitted minutes and seconds are 0."""
+    raw = (text or "").strip()
+    if not raw:
+        return "00:00:00"
+    parts = raw.replace(".", ":").split(":")
+    if len(parts) == 1:
+        parts += ["0", "0"]
+    elif len(parts) == 2:
+        parts.append("0")
+    if len(parts) != 3:
+        import i18n
+        raise ValueError(i18n.t("error.bad_reset", text=text))
+    try:
+        hour, minute, second = (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        import i18n
+        raise ValueError(i18n.t("error.bad_reset", text=text)) from None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+        import i18n
+        raise ValueError(i18n.t("error.bad_reset", text=text))
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def parse_reset(text: str) -> tuple[int, str]:
+    """Parse 27, 27T08, 27T08:30, or 27T08:00:05. Missing minute and second are 0."""
+    raw = (text or "").strip()
+    if not raw:
+        import i18n
+        raise ValueError(i18n.t("error.bad_reset", text=text))
+    if "T" in raw:
+        day_s, time_s = raw.split("T", 1)
+    elif " " in raw:
+        day_s, time_s = raw.split(None, 1)
+    else:
+        day_s, time_s = raw, "00:00:00"
+    try:
+        day = int(day_s.strip())
+    except ValueError:
+        import i18n
+        raise ValueError(i18n.t("error.bad_reset", text=text)) from None
+    if day < 1 or day > 31:
+        import i18n
+        raise ValueError(i18n.t("error.bad_reset", text=text))
+    return day, parse_reset_time(time_s)
+
+
+def format_reset(day: int, time_s: str = "00:00:00") -> str:
+    try:
+        time_s = parse_reset_time(time_s)
+    except ValueError:
+        time_s = "00:00:00"
+    day = int(day or 1)
+    if time_s == "00:00:00":
+        return str(day)
+    return f"{day}T{time_s}"
 
 
 def parse_cap(text: str) -> Optional[int]:
@@ -180,6 +244,13 @@ def cap_pct(used: int, cap: Optional[int]) -> Optional[float]:
     return used / cap * 100.0
 
 
+class HubError(RuntimeError):
+    def __init__(self, code: int, detail: str) -> None:
+        super().__init__(f"hub HTTP {code}: {detail}")
+        self.code = int(code)
+        self.detail = detail
+
+
 def http_json(
     method: str,
     url: str,
@@ -207,7 +278,7 @@ def http_json(
             body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"hub HTTP {exc.code}: {detail}") from exc
+        raise HubError(int(exc.code), detail) from exc
     if not body:
         return {}
     return json.loads(body)

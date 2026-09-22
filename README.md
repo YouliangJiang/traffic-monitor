@@ -21,11 +21,25 @@ English: [README.en.md](README.en.md)
 ## 流量怎么计
 
 - 读内核 `/proc/net/dev` 指定网卡（默认 `eth0`）的收/发字节，入站和出站都记。
-- 差值累加到按天账本：`/var/lib/traffic-monitor/traffic.json`。监控进程短时间挂了但机器没重启，内核计数还在，下次采样会补上。
-- 账单周期按 **UTC**，重置日由 `BILLING_RESET_DAY` 决定。额度按 **十进制**（`2T` = 2×10¹² 字节），与多数云厂商「套餐含入+出」的口径一致。
+- 差值按时间记入 `/var/lib/traffic-monitor/traffic.json`。只填重置日时，时刻按 `00:00:00`。监控进程短时间挂了但机器没重启，内核计数还在，下次采样会补上。
+- 账单周期用这台机器的系统时区（`timedatectl`）。重置时刻由 `BILLING_RESET_DAY` + 可选的 `BILLING_RESET_TIME`（时:分:秒，没写的分和秒为 0，只写日期则 `00:00:00`）决定。额度按 **十进制**（`2T` = 2×10¹² 字节），与多数云厂商「套餐含入+出」的口径一致。
 - 第一次安装时会留下开机快照 `bootstrap.json`，用来补上「装监控之前、自本次开机以来」的计数。
 
 这是预警账，不是云账单对账单。重启前最后一次采样到关机之间会丢掉一小段；hypervisor 计费和本机网卡也会有正常偏差。超额计费若只算出站，请另外看出站数字。
+
+
+## 套餐将尽时自动断流
+
+**前置条件：** 该节点同时配置了月额度（`MONTHLY_CAP_BYTES` 非 0）和重置时刻。无限流量不会切。不需要再配端口或业务名单。
+
+- 用量到套餐的 **80%**：Telegram 告警。
+- 用量到 **90%**：本机 nftables 切断公网业务（留 10% 缓冲），直到重置时刻再自动恢复。`/add` 如果没写重置时刻，只记账，不断流。
+- 用量按一条时间线入账。重置可以不是 0 点。重置日当天、时刻之前的流量算上一周期。
+- 保留 SSH、本监控（agent↔hub、hub 的 Telegram）、DNS/NTP/DHCP、链路本地 `169.254.0.0/16`（云厂商元数据/监控组件）、私网 RFC1918、`tailscale0`，以及 `tailscaled` 自己的隧道外层流量。其它公网出入站默认丢掉。
+- 断流由独立的 root 助手 `traffic-cut.service` 执行，监控进程本身没有改防火墙的权限。另有每分钟一次的 `traffic-cut.timer`：监控进程停了，过了重置时刻也会把规则撤掉；断流期间 Telegram 地址变了会重套规则。
+- 这不是云账单对账：入站 DDoS 仍按厂商口径计；本机只保证不再把大包打回公网。
+
+重置可写到秒，例如 `/reset node 27T08:00:00` 或安装时 `--reset 27T08:00:00`。只写日期则当天 0 点；只写小时则分钟和秒为 0。时间按该机器的系统时区。
 
 ## 角色
 
@@ -33,7 +47,7 @@ English: [README.en.md](README.en.md)
 
 - `traffic-hub`：库存、心跳、本机采样（约每 20 秒）
 - `traffic-bot`：Telegram 长轮询，只响应配置里的 `TELEGRAM_CHAT_ID`
-- `traffic-monitor.timer`：每日摘要（默认 UTC 16:00）
+- `traffic-monitor.timer`：每日摘要（默认本机 16:00）
 
 **Agent**（更多机器）
 
@@ -90,8 +104,9 @@ cp deploy.local.example deploy.local
 | `/svc 名字 xray off` | 去掉该服务 |
 | 「网速」或 `/net 名字` | 读网卡当前吞吐约 3 秒，**不打流** |
 | 「测速」或 `/bw 名字 [秒]` | 对 Cloudflare 下载/上传，测公网带宽 |
-| `/add 名字 cap=2T reset=27` | 纳入覆盖 |
-| `/cap 名字 500G` | 改额度 |
+| `/add 名字 cap=2T reset=27` | 纳入覆盖；`reset=27T08:00:00` 可到秒 |
+| `/cap 名字 500G` | 改额度；有额度+重置则 90% 断流 |
+| `/reset 名字 27` | 改本机时区的重置时刻 |
 | `/off` `/on` | 停用 / 重新启用（仍留在名单里） |
 | `/kick 名字` | 踢出，需再 `/add` 才会回来 |
 | 「中文」/「English」或 `/lang zh` `/lang en` | 切换 bot 语言 |
@@ -131,8 +146,9 @@ cp deploy.local.example deploy.local
 | `NODE_NAME` | 节点名，`[a-z][a-z0-9-]{0,31}` |
 | `TRAFFIC_IFACE` | 记账网卡 |
 | `HOST_LABEL` | Telegram 里显示的名字；空则用 `NODE_NAME`，再退回主机名 |
-| `BILLING_RESET_DAY` | UTC 月重置日 |
-| `MONTHLY_CAP_BYTES` | 额度字节数；`0` 表示不限额 |
+| `BILLING_RESET_DAY` | 本机时区的月重置日（1–31） |
+| `BILLING_RESET_TIME` | 当天本机时:分:秒，缺省为 0 |
+| `MONTHLY_CAP_BYTES` | 额度字节数；`0` 表示不限额，也不会断流 |
 | `DAILY_REPORT_HOUR_UTC` | 日报小时 |
 | `HUB_BIND` / `HUB_PORT` | Hub 监听 |
 | `HUB_URL` | Bot 连本机 hub，一般 `https://127.0.0.1:8788` |
@@ -149,5 +165,6 @@ cp deploy.local.example deploy.local
 | `traffic-bot` | 56M | 仅 hub |
 | `traffic-agent` | 96M | 仅 agent |
 | `traffic-monitor.timer` | 48M oneshot | 日报 |
+| `traffic-cut` | 32M oneshot | 套餐断流（root，nft） |
 
 状态目录：`/var/lib/traffic-monitor`。代码安装到 `/opt/traffic-monitor`。
