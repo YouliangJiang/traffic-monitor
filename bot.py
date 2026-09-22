@@ -924,7 +924,7 @@ def poll(token: str, offset: int) -> tuple[int, list[dict[str, Any]]]:
     if offset:
         payload["offset"] = offset
     try:
-        body = report.telegram_call(token, "getUpdates", payload, timeout=60, shared=False)
+        body = report.telegram_call(token, "getUpdates", payload, timeout=60)
     except Exception as exc:
         print(f"poll retry: {exc}", flush=True)
         time.sleep(2)

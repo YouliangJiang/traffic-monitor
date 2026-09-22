@@ -11,7 +11,6 @@ import resource
 import socket
 import ssl
 import sys
-import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -155,45 +154,47 @@ def host_label() -> str:
     return name or "host"
 
 
-_tg_lock = threading.Lock()
-_tg_conn: Optional[http.client.HTTPSConnection] = None
 _tg_ctx = ssl.create_default_context()
+# Handshake only. A dead address, v4 or v6, must fail fast so the next one is tried.
+_CONNECT_TIMEOUT = 5.0
 
 
-def _tg_close() -> None:
-    global _tg_conn
-    conn = _tg_conn
-    _tg_conn = None
-    if conn is None:
-        return
+def _open_telegram(read_timeout: float) -> http.client.HTTPSConnection:
+    """Open a socket for this call. The caller closes it before returning.
+
+    The bot session is the update offset, not a TCP connection. Each API call
+    dials, exchanges one request, and closes. getaddrinfo order is left to the
+    system: create_connection tries every address and abandons one that does
+    not complete the handshake within _CONNECT_TIMEOUT. The read timeout is
+    applied only after the handshake, so a long poll can wait out Telegram's
+    hold without letting a blackholed family block for that whole time.
+    """
+    if read_timeout <= 0:
+        raise ValueError("telegram read timeout must be positive")
+    conn = http.client.HTTPSConnection(
+        "api.telegram.org",
+        timeout=_CONNECT_TIMEOUT,
+        context=_tg_ctx,
+    )
     try:
-        conn.close()
-    except OSError:
-        pass
-
-
-def _tg_conn_get(timeout: int) -> http.client.HTTPSConnection:
-    global _tg_conn
-    conn = _tg_conn
-    if conn is None:
-        conn = http.client.HTTPSConnection(
-            "api.telegram.org",
-            timeout=timeout,
-            context=_tg_ctx,
-        )
-        _tg_conn = conn
+        conn.connect()
+        sock = conn.sock
+        if sock is None:
+            raise OSError("telegram connect produced no socket")
+        sock.settimeout(read_timeout)
         return conn
-    conn.timeout = timeout
-    sock = conn.sock
-    if sock is not None:
-        sock.settimeout(timeout)
-    return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _tg_exchange(conn: http.client.HTTPSConnection, http_method: str, path: str, data: bytes, headers: dict[str, str]) -> tuple[int, str]:
     conn.request(http_method, path, body=data or None, headers=headers)
     resp = conn.getresponse()
-    return int(resp.status), resp.read().decode("utf-8", errors="replace")
+    try:
+        return int(resp.status), resp.read().decode("utf-8", errors="replace")
+    finally:
+        resp.close()
 
 
 def telegram_call(
@@ -201,28 +202,20 @@ def telegram_call(
     method: str,
     payload: Optional[dict[str, Any]] = None,
     timeout: int = 20,
-    shared: bool = True,
 ) -> dict[str, Any]:
     path = f"/bot{token}/{method}"
     data = b"" if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
+    headers = {"Content-Type": "application/json", "Connection": "close"}
     http_method = "POST" if payload is not None else "GET"
     raw = ""
     status = 0
     last_exc: Optional[Exception] = None
     for _attempt in range(2):
-        if shared:
-            with _tg_lock:
-                try:
-                    conn = _tg_conn_get(timeout)
-                    status, raw = _tg_exchange(conn, http_method, path, data, headers)
-                    last_exc = None
-                    break
-                except (OSError, http.client.HTTPException, TimeoutError) as exc:
-                    last_exc = exc
-                    _tg_close()
+        try:
+            conn = _open_telegram(timeout)
+        except (OSError, TimeoutError) as exc:
+            last_exc = exc
             continue
-        conn = http.client.HTTPSConnection("api.telegram.org", timeout=timeout, context=_tg_ctx)
         try:
             status, raw = _tg_exchange(conn, http_method, path, data, headers)
             last_exc = None
