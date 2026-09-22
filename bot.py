@@ -797,7 +797,8 @@ def cmd_lang(args: list[str], _: dict[str, str]) -> Reply:
         register_bot(util.env("TELEGRAM_BOT_TOKEN"))
     except Exception:
         pass
-    return Reply(i18n.t("lang.switched") + "\n\n" + i18n.t("help.body"), help_keyboard())
+    rows = nodes(False)
+    return Reply(formatters.fleet_overview(rows), home_keyboard(rows))
 
 
 HANDLERS = {
@@ -924,7 +925,7 @@ def poll(token: str, offset: int) -> tuple[int, list[dict[str, Any]]]:
         payload["offset"] = offset
     try:
         body = report.telegram_call(token, "getUpdates", payload, timeout=60, shared=False)
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except Exception as exc:
         print(f"poll retry: {exc}", flush=True)
         time.sleep(2)
         return offset, []
@@ -1028,8 +1029,6 @@ def _slow_worker(token: str, chat_id: str) -> None:
                 )
             except Exception:
                 traceback.print_exc()
-        if qid:
-            answer_callback(token, qid, toast_for_reply(reply.text or "", status))
         print(f"slow {kind} {data} {time.monotonic()-t0:.1f}s {status}", flush=True)
         _slow_q.task_done()
 
@@ -1073,39 +1072,34 @@ def main() -> int:
                     data = str(callback.get("data") or "")
                     msg_id = message.get("message_id")
                     edit_id = int(msg_id) if msg_id else None
+                    # Acknowledge before any edit. The handler is the same in
+                    # every language; editing first makes Telegram drop the click.
+                    answer_callback(token, qid, "")
                     gen = _note_screen(edit_id)
                     if _callback_is_slow(data):
-                        _slow_q.put(("cb", data, edit_id, gen, qid))
-                        continue
-                    toast = ""
-                    t0 = time.monotonic()
-                    try:
                         send_reply(
                             token,
                             chat_id,
                             Reply(loading_text(data)),
                             edit_message_id=edit_id,
                         )
+                        _slow_q.put(("cb", data, edit_id, gen, ""))
+                        continue
+                    t0 = time.monotonic()
+                    try:
                         reply = _dispatch_callback(data)
                         t1 = time.monotonic()
-                        status = "failed"
                         shown = reply.text or i18n.t("no_content")
-                        if reply.text:
-                            status = _deliver(token, chat_id, reply, edit_id, gen)
-                        else:
-                            status = _deliver(
-                                token,
-                                chat_id,
-                                Reply(i18n.t("no_content"), help_keyboard()),
-                                edit_id,
-                                gen,
-                            )
-                        t2 = time.monotonic()
-                        print(f"cb {data} hub={t1-t0:.3f}s tg={t2-t1:.3f}s {status}", flush=True)
-                        toast = toast_for_reply(shown, status)
+                        status = _deliver(
+                            token,
+                            chat_id,
+                            reply if reply.text else Reply(shown, help_keyboard()),
+                            edit_id,
+                            gen,
+                        )
+                        print(f"cb {data} hub={t1-t0:.3f}s tg={time.monotonic()-t1:.3f}s {status}", flush=True)
                     except Exception:
                         traceback.print_exc()
-                        toast = i18n.t("toast.failed")
                         try:
                             _deliver(
                                 token,
@@ -1116,7 +1110,6 @@ def main() -> int:
                             )
                         except Exception:
                             pass
-                    answer_callback(token, qid, toast)
                     continue
                 message = update.get("message") or {}
                 if not allowed_chat(message, chat_id):
