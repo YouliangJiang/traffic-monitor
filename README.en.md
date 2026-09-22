@@ -104,6 +104,7 @@ Send the bot a message first, then set `TELEGRAM_CHAT_ID`. After that, prefer th
 | `/svc name xray off` | Remove that service |
 | NIC or `/net name` | Sample current NIC occupancy for ~3s, **no generated traffic** |
 | Speed test or `/bw name [seconds]` | Download/upload via Cloudflare (public bandwidth) |
+| Latency or `/rtt name` | Ping fixed addresses in Europe, the US, China, and Southeast Asia |
 | `/add name cap=2T reset=27` | Add to coverage; `reset=27T08:00:00` for seconds |
 | `/cap name 500G` | Change cap; cap+reset arms 90% cutoff |
 | `/reset name 27` | Change the reset instant in the host timezone |
@@ -112,6 +113,7 @@ Send the bot a message first, then set `TELEGRAM_CHAT_ID`. After that, prefer th
 | 中文 / English or `/lang zh` `/lang en` | Switch bot language |
 
 NIC occupancy is traffic currently on the card. Speed test generates traffic on purpose. They are not the same.
+Latency is a ping from that machine to Europe, the US, China, and Southeast Asia. The addresses are fixed, so they are not answered nearby.
 
 ## Optional service watches
 

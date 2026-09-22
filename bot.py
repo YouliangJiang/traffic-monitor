@@ -28,6 +28,7 @@ COMMAND_KEYS = [
     "disk",
     "net",
     "bw",
+    "rtt",
     "xray",
     "svc",
     "uptime",
@@ -60,6 +61,9 @@ ALIASES = {
     "/net": "net",
     "/bw": "bw",
     "/speed": "bw",
+    "/rtt": "rtt",
+    "/latency": "rtt",
+    "/ping": "rtt",
     "/xray": "xray",
     "/svc": "svc",
     "/service": "svc",
@@ -77,6 +81,7 @@ ALIASES = {
     "总览": "all",
     "节点": "nodes",
     "带宽": "bw",
+    "延迟": "rtt",
     "流量": "traffic",
     "/lang": "lang",
     "/en": "lang_en",
@@ -198,7 +203,7 @@ def pick_keyboard(action: str, rows: Optional[list[dict[str, Any]]] = None) -> d
         if not row.get("enabled", True):
             continue
         keyboard.append([_btn(_node_button_label(row), f"{action}:{row['name']}")])
-    if action.startswith("m:") or action == "bw":
+    if action.startswith("m:") or action in {"bw", "rtt"}:
         keyboard.append([_btn(i18n.t("btn.all"), f"{action}:all")])
     keyboard.append([_btn(i18n.t("btn.back"), "home")])
     return _markup(keyboard)
@@ -222,7 +227,11 @@ def node_keyboard(name: str, row: Optional[dict[str, Any]] = None) -> dict[str, 
     ]
     for i in range(0, len(svc_btns), 3):
         rows.append(svc_btns[i : i + 3])
-    rows.append([_btn(i18n.t("btn.uptime"), f"m:uptime:{name}"), _btn(i18n.t("btn.speedtest"), f"bw:{name}")])
+    rows.append([
+        _btn(i18n.t("btn.uptime"), f"m:uptime:{name}"),
+        _btn(i18n.t("btn.speedtest"), f"bw:{name}"),
+        _btn(i18n.t("btn.rtt"), f"rtt:{name}"),
+    ])
     rows.append([_btn(i18n.t("btn.back"), "home"), _btn(i18n.t("btn.refresh"), f"go:{name}")])
     return _markup(rows)
 
@@ -276,6 +285,8 @@ def parse_callback(data: str) -> tuple[str, list[str]]:
         return "go", [raw.split(":", 1)[1]]
     if raw.startswith("bw:"):
         return "bw", [raw.split(":", 1)[1]]
+    if raw.startswith("rtt:"):
+        return "rtt", [raw.split(":", 1)[1]]
     if raw.startswith("lang:"):
         return "lang", [raw.split(":", 1)[1]]
     if raw.startswith("s:"):
@@ -301,12 +312,14 @@ def _with_stamp(text: str) -> str:
 
 def loading_text(data: str) -> str:
     cmd, args = parse_callback(data)
-    if cmd == "bw":
+    if cmd in {"bw", "rtt"}:
         target = args[0] if args else ""
+        all_key = "loading.speed_all" if cmd == "bw" else "loading.rtt_all"
+        one_key = "loading.speed_one" if cmd == "bw" else "loading.rtt_one"
         if target == "all":
-            return i18n.t("loading.speed_all")
+            return i18n.t(all_key)
         name = report.h(util.normalize_node_name(target) if target else i18n.t("node.placeholder"))
-        return i18n.t("loading.speed_one", name=name)
+        return i18n.t(one_key, name=name)
     if cmd == "metric" and args[:1] == ["net"]:
         target = args[1] if len(args) > 1 else ""
         if target == "all":
@@ -330,19 +343,6 @@ def loading_text(data: str) -> str:
         "lang": i18n.t("loading.generic"),
     }
     return i18n.t("loading.prefix", text=labels.get(cmd, i18n.t("loading.generic")))
-
-
-def toast_for_reply(text: str, status: str) -> str:
-    if status == "failed":
-        return i18n.t("toast.update_failed")
-    if status == "unchanged":
-        return i18n.t("toast.latest")
-    stripped = text.lstrip()
-    if stripped.startswith("⏱"):
-        return i18n.t("toast.timeout")
-    if stripped.startswith("❌"):
-        return i18n.t("toast.failed")
-    return ""
 
 
 def send_reply(
@@ -453,11 +453,15 @@ def view_pick(kind_or_bw: str) -> Reply:
         name = enabled[0]["name"]
         if kind_or_bw == "bw":
             return cmd_bw([name], {})
+        if kind_or_bw == "rtt":
+            return cmd_rtt([name], {})
         if kind_or_bw in {"go", "traffic"}:
             return view_go(name)
         return view_metric(kind_or_bw, name)
     if kind_or_bw == "bw":
         return Reply(i18n.t("pick.speed"), pick_keyboard("bw", enabled))
+    if kind_or_bw == "rtt":
+        return Reply(i18n.t("pick.rtt"), pick_keyboard("rtt", enabled))
     if kind_or_bw in {"go", "traffic"}:
         return Reply(i18n.t("pick.node"), pick_keyboard("go", enabled))
     label = kind_label(kind_or_bw)
@@ -536,11 +540,13 @@ def _format_job_result(name: str, job_type: str, data: dict[str, Any]) -> str:
         except KeyError:
             pass
         return formatters.nic_result(name, data, row)
+    if job_type == "rtt":
+        return formatters.rtt_result(name, data)
     return formatters.bw_result(name, data)
 
 
 def _job_label(job_type: str) -> str:
-    return i18n.t("job.nic") if job_type == "nic" else i18n.t("job.speed")
+    return i18n.t({"nic": "job.nic", "bw": "job.speed", "rtt": "job.rtt"}.get(job_type, "job.speed"))
 
 
 def _await_job(name: str, job_id: str, job_type: str) -> str:
@@ -558,13 +564,13 @@ def _await_job(name: str, job_id: str, job_type: str) -> str:
     return _format_job_result(name, job_type, job.get("result") or {})
 
 
-def _run_job(name: str, job_type: str, seconds: float) -> str:
+def _run_job(name: str, job_type: str, params: dict[str, Any]) -> str:
     label = _job_label(job_type)
     try:
         created = hub_call(
             "POST",
             "/v1/jobs",
-            {"node": name, "type": job_type, "params": {"seconds": seconds}},
+            {"node": name, "type": job_type, "params": params},
         )
     except Exception as exc:
         return i18n.t("job.submit_fail", name=report.h(name), label=label, err=report.h(exc))
@@ -574,7 +580,7 @@ def _run_job(name: str, job_type: str, seconds: float) -> str:
     return _await_job(name, str(job_id), job_type)
 
 
-def _run_jobs_all(job_type: str, seconds: float) -> Reply:
+def _run_jobs_all(job_type: str, params: dict[str, Any]) -> Reply:
     label = _job_label(job_type)
     rows = [row for row in nodes(False) if row.get("enabled", True)]
     if not rows:
@@ -586,7 +592,7 @@ def _run_jobs_all(job_type: str, seconds: float) -> Reply:
             created = hub_call(
                 "POST",
                 "/v1/jobs",
-                {"node": row["name"], "type": job_type, "params": {"seconds": seconds}},
+                {"node": row["name"], "type": job_type, "params": params},
             )
             job_id = created.get("id")
             if not job_id:
@@ -609,12 +615,12 @@ def cmd_bw(args: list[str], _: dict[str, str]) -> Reply:
         seconds = float(rest.pop())
     seconds = max(1.0, min(15.0, seconds))
     if rest and rest[0].lower() == "all":
-        return _run_jobs_all("bw", seconds)
+        return _run_jobs_all("bw", {"seconds": seconds})
     try:
         name = default_target(rest)
     except ValueError:
         return view_pick("bw")
-    return Reply(_run_job(name, "bw", seconds), node_keyboard(name))
+    return Reply(_run_job(name, "bw", {"seconds": seconds}), node_keyboard(name))
 
 
 def cmd_nic(args: list[str], _: dict[str, str]) -> Reply:
@@ -624,12 +630,22 @@ def cmd_nic(args: list[str], _: dict[str, str]) -> Reply:
         seconds = float(rest.pop())
     seconds = max(1.0, min(15.0, seconds))
     if rest and rest[0].lower() == "all":
-        return _run_jobs_all("nic", seconds)
+        return _run_jobs_all("nic", {"seconds": seconds})
     try:
         name = default_target(rest)
     except ValueError:
         return view_pick("net")
-    return Reply(_run_job(name, "nic", seconds), node_keyboard(name))
+    return Reply(_run_job(name, "nic", {"seconds": seconds}), node_keyboard(name))
+
+
+def cmd_rtt(args: list[str], _: dict[str, str]) -> Reply:
+    if args and args[0].lower() == "all":
+        return _run_jobs_all("rtt", {})
+    try:
+        name = default_target(args)
+    except ValueError:
+        return view_pick("rtt")
+    return Reply(_run_job(name, "rtt", {}), node_keyboard(name))
 
 
 def cmd_add(args: list[str], flags: dict[str, str]) -> Reply:
@@ -814,6 +830,7 @@ HANDLERS = {
     "disk": cmd_disk,
     "net": cmd_net,
     "bw": cmd_bw,
+    "rtt": cmd_rtt,
     "xray": cmd_xray,
     "svc": cmd_svc,
     "uptime": cmd_uptime,
@@ -866,15 +883,15 @@ def handle_callback(data: str) -> Reply:
         if len(args) < 2:
             return Reply(i18n.t("unknown.button"), help_keyboard())
         return view_svc(args[0], args[1])
-    if cmd == "bw":
+    if cmd in {"bw", "rtt"}:
         target = args[0] if args else ""
         if not target:
-            return view_pick("bw")
+            return view_pick(cmd)
         if target == "all":
-            return cmd_bw(["all"], {})
+            return HANDLERS[cmd](["all"], {})
         if not util.valid_node_name(util.normalize_node_name(target)):
             raise KeyError(target)
-        return cmd_bw([target], {})
+        return HANDLERS[cmd]([target], {})
     return Reply(i18n.t("unknown.button"), help_keyboard())
 
 
@@ -982,14 +999,14 @@ def _screen_is(msg_id: Optional[int], gen: int) -> bool:
 
 def _callback_is_slow(data: str) -> bool:
     cmd, args = parse_callback(data)
-    if cmd == "bw":
+    if cmd in {"bw", "rtt"}:
         return True
     return cmd == "metric" and args[:1] == ["net"]
 
 
 def _text_is_slow(text: str) -> bool:
     cmd, _args, _flags = parse_message(text)
-    return cmd in {"bw", "net"}
+    return cmd in {"bw", "net", "rtt"}
 
 
 def _deliver(token: str, chat_id: str, reply: Reply, edit_id: Optional[int], gen: int) -> str:
@@ -999,7 +1016,7 @@ def _deliver(token: str, chat_id: str, reply: Reply, edit_id: Optional[int], gen
 
 
 def _slow_worker(token: str, chat_id: str) -> None:
-    """Run NIC samples and speed tests off the poll thread.
+    """Run NIC samples, speed tests, and latency probes off the poll thread.
 
     The button spinner stays up until the result is written and the callback
     is answered. Editing the message earlier makes Telegram clear that spinner.

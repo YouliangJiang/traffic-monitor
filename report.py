@@ -15,7 +15,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Optional
 
 import i18n
@@ -240,13 +239,6 @@ def telegram_call(
     if not body.get("ok"):
         raise RuntimeError(body)
     return body
-
-
-def read_boot_id() -> str:
-    try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
 
 
 

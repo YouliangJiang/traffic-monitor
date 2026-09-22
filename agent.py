@@ -87,17 +87,13 @@ def clear_install_push() -> None:
 def execute_job(job: dict[str, Any], iface: str, *, cutting: bool) -> dict[str, Any]:
     job_id = str(job.get("id") or "")
     try:
-        if job.get("type") == "bw":
-            if cutting:
-                return {"id": job_id, "ok": False, "error": "cutoff active"}
-            seconds = float((job.get("params") or {}).get("seconds") or 3)
-            data = hostinfo.sample_bandwidth(iface, seconds)
-            return {"id": job_id, "ok": True, "data": data}
-        if job.get("type") == "nic":
-            seconds = float((job.get("params") or {}).get("seconds") or 3)
-            data = hostinfo.sample_nic(iface, seconds)
-            return {"id": job_id, "ok": True, "data": data}
-        return {"id": job_id, "ok": False, "error": f"unknown job {job.get('type')}"}
+        data = hostinfo.run_sample(
+            str(job.get("type") or ""),
+            job.get("params") or {},
+            iface,
+            cutting=cutting,
+        )
+        return {"id": job_id, "ok": True, "data": data}
     except Exception as exc:
         return {"id": job_id, "ok": False, "error": str(exc)}
 

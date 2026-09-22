@@ -104,6 +104,7 @@ cp deploy.local.example deploy.local
 | `/svc 名字 xray off` | 去掉该服务 |
 | 「网速」或 `/net 名字` | 读网卡当前吞吐约 3 秒，**不打流** |
 | 「测速」或 `/bw 名字 [秒]` | 对 Cloudflare 下载/上传，测公网带宽 |
+| 「延迟」或 `/rtt 名字` | 这台机器 ping 欧洲、美国、中国、东南亚的固定地址 |
 | `/add 名字 cap=2T reset=27` | 纳入覆盖；`reset=27T08:00:00` 可到秒 |
 | `/cap 名字 500G` | 改额度；有额度+重置则 90% 断流 |
 | `/reset 名字 27` | 改本机时区的重置时刻 |
@@ -112,6 +113,7 @@ cp deploy.local.example deploy.local
 | 「中文」/「English」或 `/lang zh` `/lang en` | 切换 bot 语言 |
 
 「网速」看的是网卡正在走的流量；「测速」才会主动打流。两者不是一回事。
+「延迟」是这台机器到欧洲、美国、中国、东南亚的 ping。地址是固定的，不会就近落到本地。
 
 ## 可选服务探活
 

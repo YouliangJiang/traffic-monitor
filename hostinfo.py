@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import http.client
 import os
+import re
 import socket
 import ssl
+import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -402,3 +405,96 @@ def collect_host(iface: str = "eth0", interval: float = 0.35) -> HostInfo:
         net_window_sec=net_window_sec,
         uptime_sec=_read_uptime(),
     )
+
+
+JOB_TYPES = {"bw", "nic", "rtt"}
+RTT_SAMPLES = 3
+_PING_WAIT = 1
+# Unicast addresses. A hostname, or an anycast resolver such as 1.1.1.1,
+# is answered from nearby, so the RTT would not be to that region.
+REGIONS = (
+    ("eu", "194.150.168.168"),
+    ("us", "132.163.97.1"),
+    ("cn", "202.96.134.133"),
+    ("sea", "203.116.1.78"),
+)
+
+
+def _ping_count(samples: int) -> int:
+    try:
+        count = int(samples)
+    except (TypeError, ValueError):
+        count = RTT_SAMPLES
+    return max(3, min(5, count))
+
+
+def _ping_ip(ip: str, count: int) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["ping", "-n", "-c", str(count), "-W", str(_PING_WAIT), ip],
+            capture_output=True,
+            text=True,
+            timeout=count * (_PING_WAIT + 1),
+            env={"LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"samples": count, "received": 0, "loss_pct": 100}
+    output = proc.stdout or ""
+    stats = re.search(r"(\d+) packets transmitted,\s+(\d+) received", output)
+    if not stats:
+        return {"samples": count, "received": 0, "loss_pct": 100}
+    sent, got = int(stats.group(1)), int(stats.group(2))
+    row: dict[str, Any] = {
+        "samples": sent,
+        "received": got,
+        "loss_pct": round(100 * (sent - got) / sent) if sent else 100,
+    }
+    rtt = re.search(r"=\s*([\d.]+)/([\d.]+)/", output)
+    if rtt and got:
+        row["min_ms"] = round(float(rtt.group(1)), 1)
+        row["avg_ms"] = round(float(rtt.group(2)), 1)
+    return row
+
+
+def sample_region_rtt(samples: int = RTT_SAMPLES) -> dict[str, Any]:
+    """Ping one unicast address in each region, in parallel."""
+    count = _ping_count(samples)
+
+    def run(item: tuple[str, str]) -> dict[str, Any]:
+        region, ip = item
+        row = _ping_ip(ip, count)
+        row["id"] = region
+        return row
+
+    with ThreadPoolExecutor(max_workers=len(REGIONS)) as pool:
+        regions = list(pool.map(run, REGIONS))
+    return {"regions": regions}
+
+
+def _job_seconds(params: dict[str, Any]) -> float:
+    try:
+        return float(params.get("seconds") or 3)
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _job_samples(params: dict[str, Any]) -> int:
+    try:
+        return int(params.get("samples") or RTT_SAMPLES)
+    except (TypeError, ValueError):
+        return RTT_SAMPLES
+
+
+def run_sample(job_type: str, params: dict[str, Any], iface: str, *, cutting: bool) -> dict[str, Any]:
+    """One measurement job. Bandwidth is refused while the cap cutoff is active."""
+    if not isinstance(params, dict):
+        params = {}
+    if job_type == "bw":
+        if cutting:
+            raise RuntimeError("cutoff active")
+        return sample_bandwidth(iface, _job_seconds(params))
+    if job_type == "nic":
+        return sample_nic(iface, _job_seconds(params))
+    if job_type == "rtt":
+        return sample_region_rtt(_job_samples(params))
+    raise RuntimeError(f"unknown job {job_type}")

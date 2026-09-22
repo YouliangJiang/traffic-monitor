@@ -356,6 +356,28 @@ def bw_result(name: str, data: dict[str, Any]) -> str:
     )
 
 
+def rtt_result(name: str, data: dict[str, Any]) -> str:
+    lines = []
+    for item in data.get("regions") or []:
+        label = i18n.t(f"rtt.region.{item.get('id')}")
+        if item.get("received") and item.get("avg_ms") is not None:
+            value = f"{float(item['avg_ms']):.0f} ms"
+            loss = int(item.get("loss_pct") or 0)
+            if loss:
+                value += f"  ({loss}%)"
+        else:
+            value = i18n.t("rtt.none")
+        lines.append(f"{label}  {value}")
+    body = "\n".join(lines) if lines else i18n.t("rtt.none")
+    return (
+        i18n.t("rtt.title", name=report.h(name))
+        + "\n\n<pre>"
+        + body
+        + "</pre>\n"
+        + i18n.t("rtt.hint")
+    )
+
+
 def add_help(name: str, hub_url: str, cap_text: str, reset_day: int, reset_time: str = "00:00:00") -> str:
     return i18n.t(
         "add.done",

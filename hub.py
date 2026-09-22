@@ -345,21 +345,16 @@ class Hub:
             return
         rec = self.nodes.get(self.local_name) or {}
         iface = rec.get("iface") or self.iface
+        snap = (self.runtime.get(self.local_name) or {}).get("snapshot") or {}
+        cutting = (snap.get("cut") or {}).get("want") == "cut"
         try:
-            if job["type"] == "bw":
-                snap = (self.runtime.get(self.local_name) or {}).get("snapshot") or {}
-                if (snap.get("cut") or {}).get("want") == "cut":
-                    self.finish_job(job_id, False, error="cutoff active")
-                    return
-                seconds = float((job.get("params") or {}).get("seconds") or 3)
-                data = hostinfo.sample_bandwidth(iface, seconds)
-                self.finish_job(job_id, True, data)
-            elif job["type"] == "nic":
-                seconds = float((job.get("params") or {}).get("seconds") or 3)
-                data = hostinfo.sample_nic(iface, seconds)
-                self.finish_job(job_id, True, data)
-            else:
-                self.finish_job(job_id, False, error=f"unknown job {job['type']}")
+            data = hostinfo.run_sample(
+                str(job.get("type") or ""),
+                job.get("params") or {},
+                iface,
+                cutting=cutting,
+            )
+            self.finish_job(job_id, True, data)
         except Exception as exc:
             self.finish_job(job_id, False, error=str(exc))
 
@@ -672,6 +667,9 @@ class HubHandler(BaseHTTPRequestHandler):
             name = str(body.get("node") or "")
             job_type = str(body.get("type") or "")
             params = body.get("params") or {}
+            if not isinstance(params, dict) or job_type not in hostinfo.JOB_TYPES:
+                self._send(400, {"ok": False, "error": "unknown job"})
+                return
             try:
                 job_id = HUB.submit_job(name, job_type, params)
             except KeyError:
