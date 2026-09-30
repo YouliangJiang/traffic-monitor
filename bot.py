@@ -16,6 +16,8 @@ import formatters
 import i18n
 import report
 import util
+import security_formatters
+from urllib.parse import urlencode
 
 COMMAND_KEYS = [
     "all",
@@ -31,6 +33,7 @@ COMMAND_KEYS = [
     "rtt",
     "xray",
     "svc",
+    "security",
     "uptime",
     "add",
     "cap",
@@ -65,6 +68,8 @@ ALIASES = {
     "/latency": "rtt",
     "/ping": "rtt",
     "/xray": "xray",
+    "/security": "security",
+    "/alerts": "security",
     "/svc": "svc",
     "/service": "svc",
     "/uptime": "uptime",
@@ -232,6 +237,7 @@ def node_keyboard(name: str, row: Optional[dict[str, Any]] = None) -> dict[str, 
         _btn(i18n.t("btn.speedtest"), f"bw:{name}"),
         _btn(i18n.t("btn.rtt"), f"rtt:{name}"),
     ])
+    rows.append([_btn(i18n.t("security.button"), "security:" + name)])
     rows.append([_btn(i18n.t("btn.back"), "home"), _btn(i18n.t("btn.refresh"), f"go:{name}")])
     return _markup(rows)
 
@@ -281,6 +287,16 @@ def parse_callback(data: str) -> tuple[str, list[str]]:
         return "home", []
     if raw in {"nodes", "help"}:
         return raw, []
+    if raw.startswith("security:"):
+        return "security", [raw.split(":", 1)[1]]
+    if raw.startswith("se:"):
+        parts = raw.split(":", 2)
+        if (
+            len(parts) == 3 and util.valid_node_name(parts[1])
+            and re.fullmatch("[a-f0-9]{16,64}", parts[2])
+        ):
+            return "security_event", parts[1:]
+        return "", []
     if raw.startswith("go:"):
         return "go", [raw.split(":", 1)[1]]
     if raw.startswith("bw:"):
@@ -817,6 +833,35 @@ def cmd_lang(args: list[str], _: dict[str, str]) -> Reply:
     return Reply(formatters.fleet_overview(rows), home_keyboard(rows))
 
 
+def cmd_security(args: list[str], flags: dict[str, str]) -> Reply:
+    target = util.normalize_node_name(args[0]) if args else "all"
+    rows = nodes(True) if target == "all" else [node_named(target)]
+    query = urlencode({"node": target if target != "all" else ""})
+    events = hub_call("GET", "/v1/security/events?" + query)["events"]
+    keyboard = [
+        [_btn(i18n.t("security.button") + " · " + row["name"], "security:" + row["name"])]
+        for row in rows
+    ]
+    for event in events[:4]:
+        keyboard.append([_btn(
+            i18n.t("security.details") + " · " + event["node"],
+            "se:" + event["node"] + ":" + event["event_id"][:16],
+        )])
+    keyboard.append([_btn(i18n.t("btn.back"), "home")])
+    return Reply(security_formatters.overview(rows, events), _markup(keyboard))
+
+
+def view_security_event(node: str, identity: str) -> Reply:
+    query = urlencode({"node": node, "id": identity})
+    event = hub_call("GET", "/v1/security/events?" + query)["events"]
+    if not event:
+        raise KeyError(identity)
+    return Reply(
+        security_formatters.notification(node, event),
+        security_formatters.markup(node, event["event_id"]),
+    )
+
+
 HANDLERS = {
     "help": cmd_help,
     "lang": cmd_lang,
@@ -833,6 +878,7 @@ HANDLERS = {
     "rtt": cmd_rtt,
     "xray": cmd_xray,
     "svc": cmd_svc,
+    "security": cmd_security,
     "uptime": cmd_uptime,
     "add": cmd_add,
     "cap": cmd_cap,
@@ -860,6 +906,10 @@ def handle(text: str) -> Reply:
 
 def handle_callback(data: str) -> Reply:
     cmd, args = parse_callback(data)
+    if cmd == "security":
+        return cmd_security(args, {})
+    if cmd == "security_event":
+        return view_security_event(args[0], args[1])
     if cmd == "home":
         return view_home()
     if cmd == "nodes":

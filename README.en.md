@@ -47,7 +47,7 @@ Reset can be second-precise, e.g. `/reset node 27T08:00:00` or `--reset 27T08:00
 
 - `traffic-hub`: inventory, heartbeats, local sampling (~every 20s)
 - `traffic-bot`: Telegram long poll; only the configured `TELEGRAM_CHAT_ID` is accepted
-- `traffic-monitor.timer`: daily summary (default 16:00 host local time)
+- `traffic-monitor.timer`: daily summary at 00:00 Asia/Singapore
 
 **Agent** (more hosts)
 
@@ -155,13 +155,36 @@ See `traffic-monitor.env.example`. Do not commit a filled-in copy.
 | `BILLING_RESET_DAY` | Reset day in the host timezone (1–31) |
 | `BILLING_RESET_TIME` | Local `HH[:MM[:SS]]` that day; omitted fields are 0 |
 | `MONTHLY_CAP_BYTES` | Cap in bytes; `0` means unlimited and no cutoff |
-| `DAILY_REPORT_HOUR_UTC` | Daily summary hour |
+| `SECURITY_PROVIDER` | `xray_honeypot` enables local passive security ingestion |
+| `SECURITY_EVENT_LOG` / `SECURITY_STATUS_FILE` | Local JSONL and atomic sensor status paths |
 | `HUB_BIND` / `HUB_PORT` | Hub listen address |
 | `HUB_URL` | Bot to local hub, usually `https://127.0.0.1:8788` |
 | `FLEET_HUB_URL` | Agent to hub (`https://...`) |
 | `FLEET_PUBLIC_URL` | Optional public URL for join hints |
 | `HUB_CA` | Hub cert for agents, default `/var/lib/traffic-monitor/hub.crt` |
 | `UI_LANG` | Default bot language, `zh` or `en`. Telegram buttons override this in `ui.json` |
+
+## Passive security integration
+
+Install XrayHoneypot 0.4+ on each node and set `SECURITY_PROVIDER=xray_honeypot`.
+Disable its direct Telegram sender. The installer grants `trafficmon` read access
+through the sensor group; restart the Hub/Agent afterwards. Default paths are
+`/var/log/xray-honeypot/events.jsonl` and `status.json` (0750 directory, 0640 files).
+
+An independent worker persists JSONL cursors and up to 4096 outgoing events in
+SQLite, stops advancing when full, and retries until the Hub acknowledges event
+IDs. Restore connectivity before log retention deletes unread files. Agents can
+submit only for their own node; the Hub deduplicates and retains 30 days of events.
+Initial history is backfill, with no immediate notifications. High-severity delivery
+has persistent retries; an uncertain Telegram response can produce a duplicate.
+
+`/security [node|all]`, `/alerts`, and the Security button show recent events, RSS,
+packet loss, cache evictions, and stale sensors. Daily reports include security
+counts for the previous Singapore calendar day, by Hub receipt time, at **00:00
+Asia/Singapore**. Late events count on the day received. Failed reports retry every
+five minutes; successful dates are remembered in `daily-sent.json`.
+`python3 hub.py --daily-preview` previews without sending. For ordinary HTTPS use
+`tls_observation`, which disables REALITY differential classification.
 
 ## systemd memory caps
 

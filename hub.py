@@ -11,6 +11,8 @@ import traceback
 import uuid
 import queue
 import copy
+import sys
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +25,8 @@ import snapshot
 import util
 import i18n
 import protocol
+import security_events
+import security_formatters
 
 STALE_AFTER = 90
 MAX_JOB_WAIT = 50
@@ -61,6 +65,7 @@ class Hub:
         self.collector = None
         self.last_good = 0.0
         self.stop = threading.Event()
+        self.security_store = security_events.EventStore()
         self.path = util.state_dir() / "inventory.json"
         self.runtime: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -485,9 +490,50 @@ class Hub:
             finally:
                 self.local_queue.task_done()
 
+    def security_loop(self) -> None:
+        reader = security_events.EventReader()
+        while not self.stop.is_set():
+            try:
+                reader.scan()
+                batch = reader.batch()
+                acknowledged = self.security_store.ingest(self.local_name, batch, reader.status())
+                reader.acknowledge(acknowledged)
+            except Exception as exc:
+                print("local security collection retry: " + type(exc).__name__, flush=True)
+            self.stop.wait(5)
+
+    def security_notify_loop(self) -> None:
+        while not self.stop.is_set():
+            item = None
+            try:
+                item = self.security_store.pending()
+                if not item:
+                    self.stop.wait(2)
+                    continue
+                event = json.loads(item["data"])
+                report.send_telegram(
+                    util.env("TELEGRAM_BOT_TOKEN"),
+                    util.env("TELEGRAM_CHAT_ID"),
+                    security_formatters.notification(item["node"], event),
+                    security_formatters.markup(item["node"], event["event_id"]),
+                )
+                self.security_store.notified(item["node"], item["id"], True)
+            except Exception:
+                traceback.print_exc()
+                if item:
+                    try:
+                        self.security_store.notified(item["node"], item["id"], False)
+                    except Exception:
+                        traceback.print_exc()
+                self.stop.wait(5)
+            self.stop.wait(1)
+
     def start_workers(self) -> None:
         self.collector = threading.Thread(target=self.local_loop, name="local-collect", daemon=True)
         self.collector.start()
+        if security_events.enabled():
+            threading.Thread(target=self.security_loop, name="security-local", daemon=True).start()
+        threading.Thread(target=self.security_notify_loop, name="security-notify", daemon=True).start()
         threading.Thread(target=self.alert_loop, name="alerts", daemon=True).start()
         threading.Thread(target=self.job_loop, name="measurements", daemon=True).start()
 
@@ -522,6 +568,7 @@ class Hub:
                     "iface": rec.get("iface") or "eth0",
                     "note": rec.get("note") or "",
                     "svc": specs,
+                    "security": self.security_store.sensor(name),
                     "online": bool(online),
                     "last_seen": last_seen,
                     "age": (now - last_seen) if last_seen else None,
@@ -605,6 +652,29 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth():
             self._send(401, {"ok": False, "error": "unauthorized"})
             return
+        if parsed.path == "/v1/security/events":
+            query = parse_qs(parsed.query)
+            node = (query.get("node") or [""])[0]
+            identity = (query.get("id") or [""])[0]
+            data = (
+                HUB.security_store.detail(node, identity)
+                if identity else HUB.security_store.recent(node)
+            )
+            self._send(200, {"ok": True, "events": data})
+            return
+        if parsed.path == "/v1/security/summary":
+            query = parse_qs(parsed.query)
+            try:
+                begin = float((query.get("start") or [str(time.time()-86400)])[0])
+                finish = float((query.get("end") or [str(time.time())])[0])
+            except ValueError:
+                self._send(400, {"ok": False, "error": "invalid summary range"})
+                return
+            if not 0 <= finish-begin <= 31*86400:
+                self._send(400, {"ok": False, "error": "invalid summary range"})
+                return
+            self._send(200, {"ok": True, "counts": HUB.security_store.summary(begin, finish)})
+            return
         if parsed.path == "/v1/nodes":
             self._send(200, {"ok": True, "nodes": HUB.view()})
             return
@@ -640,7 +710,7 @@ class HubHandler(BaseHTTPRequestHandler):
             self._send(500, {"ok": False})
             return
         parsed = urlparse(self.path)
-        if not self._auth(allow_agent=parsed.path == "/v1/sync"):
+        if not self._auth(allow_agent=parsed.path in {"/v1/sync", "/v1/events"}):
             self._send(401, {"ok": False, "error": "unauthorized"})
             return
         try:
@@ -651,6 +721,17 @@ class HubHandler(BaseHTTPRequestHandler):
             self._send(413, {"ok": False, "error": "payload too large"})
             return
         body = self._read_json()
+        if parsed.path == "/v1/events":
+            name = util.normalize_node_name(str(body.get("name") or ""))
+            if name != self.principal or name == HUB.local_name or name in HUB.kicked:
+                self._send(403, {"ok": False, "error": "node identity mismatch"})
+                return
+            HUB._require(name)
+            acknowledged = HUB.security_store.ingest(
+                name, body.get("events") or [], body.get("status") or {}
+            )
+            self._send(200, {"ok": True, "ack": acknowledged})
+            return
         if parsed.path == "/v1/sync":
             name = util.normalize_node_name(str(body.get("name") or ""))
             if not util.valid_node_name(name):
@@ -859,22 +940,42 @@ def serve() -> None:
     server.serve_forever()
 
 
-def daily_report() -> None:
+def daily_report(preview: bool = False) -> None:
     token = util.env("TELEGRAM_BOT_TOKEN")
     chat_id = util.env("TELEGRAM_CHAT_ID")
     fleet = util.env_opt("HUB_URL", "https://127.0.0.1:8788").rstrip("/")
     rows = util.http_json("GET", f"{fleet}/v1/nodes", util.env("ADMIN_TOKEN"), timeout=15)
     import formatters
 
+    finish = datetime.now(security_events.SG).replace(hour=0, minute=0, second=0, microsecond=0)
+    begin = finish - timedelta(days=1)
+    counts = util.http_json(
+        "GET",
+        f"{fleet}/v1/security/summary?start={begin.timestamp()}&end={finish.timestamp()}",
+        util.env("ADMIN_TOKEN"),
+        timeout=15,
+    )["counts"]
     text = formatters.fleet_overview(rows.get("nodes") or [], title=i18n.t("fleet.daily_title"))
+    text += "\n\n" + security_formatters.daily(rows.get("nodes") or [], counts, begin, finish)
+    if preview:
+        print(text)
+        return
+    sent_path = util.state_dir() / "daily-sent.json"
+    sent = util.load_json(sent_path)
+    identity = begin.date().isoformat()
+    if sent.get("report_day") == identity:
+        print("daily report already delivered", flush=True)
+        return
     report.send_telegram(token, chat_id, text)
+    util.save_json(sent_path, {
+        "report_day": identity,
+        "sent_at": datetime.now(security_events.SG).isoformat(timespec="seconds"),
+    })
     print("daily report sent", flush=True)
 
 
 if __name__ == "__main__":
-    import sys
-
-    if "--daily" in sys.argv:
-        daily_report()
+    if "--daily" in sys.argv or "--daily-preview" in sys.argv:
+        daily_report(preview="--daily-preview" in sys.argv)
     else:
         serve()

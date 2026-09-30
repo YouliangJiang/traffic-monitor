@@ -12,6 +12,7 @@ import cut
 import hostinfo
 import snapshot
 import util
+import security_events
 
 
 def _cap() -> Optional[int]:
@@ -149,6 +150,8 @@ def main() -> None:
             wake.clear()
 
     threading.Thread(target=collect, name="agent-collect", daemon=True).start()
+    if security_events.enabled():
+        threading.Thread(target=security_events.agent_worker, args=(name, hub_url, token), name="security-report", daemon=True).start()
     cache_path = util.state_dir() / "jobs-seen.json"
     cache = util.load_json(cache_path, strict=True) if cache_path.exists() else {}
     pending_job = next((entry.get("job") for entry in cache.values() if entry.get("state") in {"received", "started"}), None)

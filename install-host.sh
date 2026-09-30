@@ -56,7 +56,7 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" && ! -f 
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
+for required in security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
     locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer \
@@ -77,6 +77,9 @@ if ! id trafficmon >/dev/null 2>&1; then
     nologin=/usr/sbin/nologin
     [[ -x "$nologin" ]] || nologin=/sbin/nologin
     useradd -r -M -d /var/lib/traffic-monitor -s "$nologin" trafficmon
+fi
+if getent group xray-honeypot >/dev/null; then
+    usermod -a -G xray-honeypot trafficmon
 fi
 
 export SYSTEMD_PAGER=
@@ -184,6 +187,9 @@ merged = {
     "TELEGRAM_CHAT_ID": keep("TELEGRAM_CHAT_ID") if role == "hub" else "",
     "HUB_CA": keep("HUB_CA", "/var/lib/traffic-monitor/hub.crt"),
     "UI_LANG": keep("UI_LANG", "zh"),
+    "SECURITY_PROVIDER": keep("SECURITY_PROVIDER"),
+    "SECURITY_EVENT_LOG": keep("SECURITY_EVENT_LOG"),
+    "SECURITY_STATUS_FILE": keep("SECURITY_STATUS_FILE"),
 }
 if role == "hub" and not merged["TELEGRAM_BOT_TOKEN"]:
     raise SystemExit("hub role needs TELEGRAM_BOT_TOKEN in /etc/traffic-monitor.env")

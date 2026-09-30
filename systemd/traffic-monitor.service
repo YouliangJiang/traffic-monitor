@@ -5,6 +5,8 @@ Wants=network-online.target traffic-hub.service
 
 [Service]
 Type=oneshot
+Restart=on-failure
+RestartSec=300
 User=trafficmon
 Group=trafficmon
 EnvironmentFile=/etc/traffic-monitor.env

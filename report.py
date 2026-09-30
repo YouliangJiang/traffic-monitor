@@ -356,7 +356,7 @@ def collect_snapshot(
 
 
 
-def send_telegram(token: str, chat_id: str, text: str) -> None:
+def send_telegram(token: str, chat_id: str, text: str, markup: Optional[dict[str, Any]] = None) -> None:
     last_error: Optional[Exception] = None
     payload = {
         "chat_id": chat_id,
@@ -364,6 +364,8 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    if markup is not None:
+        payload["reply_markup"] = markup
     for _attempt in range(3):
         try:
             telegram_call(token, "sendMessage", payload, timeout=12)

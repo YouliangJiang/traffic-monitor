@@ -131,6 +131,7 @@ def main():
     parser.add_argument('--cap')
     parser.add_argument('--reset')
     parser.add_argument('--iface')
+    parser.add_argument('--security-provider', choices=['xray_honeypot','off'])
     args=parser.parse_args()
     settings={}
     local=ROOT/'deploy.local'
@@ -157,6 +158,10 @@ def main():
                 bundle.add(path,arcname=path.name,filter=lambda entry:None if '__pycache__' in entry.name else entry)
         ssh(target,'sudo -n tar -xzf - -C '+shlex.quote(stage),archive.getvalue())
         updates={key:settings[key] for key in ['TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','ADMIN_TOKEN','AGENT_TOKEN'] if settings.get(key)}
+        if args.security_provider:
+            updates['SECURITY_PROVIDER'] = '' if args.security_provider == 'off' else args.security_provider
+            if args.security_provider != 'off':
+                updates.update(SECURITY_EVENT_LOG='/var/log/xray-honeypot/events.jsonl', SECURITY_STATUS_FILE='/var/log/xray-honeypot/status.json')
         if updates:python(target,UPDATE_ENV,updates)
         if role=='agent':
             hub_host=args.hub_host or settings.get('HUB_HOST')

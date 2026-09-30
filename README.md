@@ -47,7 +47,7 @@ English: [README.en.md](README.en.md)
 
 - `traffic-hub`：库存、心跳、本机采样（约每 20 秒）
 - `traffic-bot`：Telegram 长轮询，只响应配置里的 `TELEGRAM_CHAT_ID`
-- `traffic-monitor.timer`：每日摘要（默认本机 16:00）
+- `traffic-monitor.timer`：每日摘要（新加坡时间每日 00:00）
 
 **Agent**（更多机器）
 
@@ -102,6 +102,7 @@ cp deploy.local.example deploy.local
 | `/traffic` `/today` `/cpu` `/mem` `/disk` `/uptime` | 可加名字或 `all` |
 | `/svc 名字 xray 443,2053` | 可选：在该机探测这些 TCP 端口；不配则详情里不显示 |
 | `/svc 名字 xray off` | 去掉该服务 |
+| `/security [名字或 all]` / `/alerts` /「安全」 | 传感器健康、内存、丢包及安全事件详情 |
 | 「网速」或 `/net 名字` | 读网卡当前吞吐约 3 秒，**不打流** |
 | 「测速」或 `/bw 名字 [秒]` | 对 Cloudflare 下载/上传，测公网带宽 |
 | 「延迟」或 `/rtt 名字` | 这台机器 ping 欧洲、美国、中国、东南亚的固定地址 |
@@ -136,6 +137,28 @@ cp deploy.local.example deploy.local
 `/xray` 仍可用：若该机配过名为 `xray` 的服务就看它，否则看第一个已配服务。
 
 
+## XrayHoneypot 安全扩展
+
+在每台机器安装 XrayHoneypot 0.4+，关闭其直接 Telegram 发送，在监控环境文件中
+设置 `SECURITY_PROVIDER=xray_honeypot`。安装器会把 `trafficmon` 加入日志读取组，
+重启本机 Hub/Agent 以获得组权限。事件/状态路径默认分别为
+`/var/log/xray-honeypot/events.jsonl` 与 `status.json`，目录 0750、文件 0640。
+部署时也可使用 `python3 deploy.py HOST --security-provider xray_honeypot`。
+
+独立采集线程将 JSONL 游标和待上报事件持久化在 `security-outbox.sqlite3`，
+Hub 用 `security-events.sqlite3` 按节点与事件 ID 去重，保存 30 天。
+每个 Agent 仅可用自己的凭证上报自己的安全事件。未确认事件保持在最多 4096 条的
+发送队列，满队列时停止推进文件游标；应在日志轮转删除前恢复连接。
+重启和网络故障不会清除队列；通知失败持久化重试，Telegram 回应不确定时可能重复。
+首次读取的历史事件只纳入统计，不重发即时告警。
+上报时间戳统一到 UTC 秒级 RFC3339，旧日志的纳秒格式仍可读取，事件 ID 保留原始唯一性。
+
+高危事件由 Hub 即时通知，中/低危在每日安全摘要汇总。日报仍由同一 bot 发送，
+每天 **00:00 Asia/Singapore** 汇总前一个新加坡自然日收到的事件；迟到事件计入
+收到当天。报告包含四类信息：各节点高/中/低数量、采集状态、抓包丢失与缓存淘汰。
+`python3 hub.py --daily-preview` 只预览，不发送。失败日报每 5 分钟重试，已成功日期
+写入 `daily-sent.json`。普通 HTTPS 节点使用 `tls_observation`，禁用 REALITY 差分归因。
+
 ## `/etc/traffic-monitor.env`
 
 对照 `traffic-monitor.env.example`。不要把填好的文件提交到 git。
@@ -153,7 +176,8 @@ cp deploy.local.example deploy.local
 | `BILLING_RESET_DAY` | 本机时区的月重置日（1–31） |
 | `BILLING_RESET_TIME` | 当天本机时:分:秒，缺省为 0 |
 | `MONTHLY_CAP_BYTES` | 额度字节数；`0` 表示不限额，也不会断流 |
-| `DAILY_REPORT_HOUR_UTC` | 日报小时 |
+| `SECURITY_PROVIDER` | `xray_honeypot` 启用安全扩展；留空关闭本机事件读取 |
+| `SECURITY_EVENT_LOG` / `SECURITY_STATUS_FILE` | 本机 JSONL 和原子状态快照路径 |
 | `HUB_BIND` / `HUB_PORT` | Hub 监听 |
 | `HUB_URL` | Bot 连本机 hub，一般 `https://127.0.0.1:8788` |
 | `FLEET_HUB_URL` | Agent 连 hub（`https://...`） |
