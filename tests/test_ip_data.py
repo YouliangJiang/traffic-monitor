@@ -1,10 +1,12 @@
 import csv
 import gzip
+import fcntl
 import json
 import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -140,6 +142,53 @@ class LocalIPDataTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     update.update(self.root)
         self.assertEqual((self.root / "geo.sqlite3").read_bytes(), before)
+        state = json.loads((self.root / "status.json").read_text())
+        self.assertEqual(state["result"], "error")
+        self.assertEqual(state["error"], "OSError")
+
+    def test_publication_keeps_only_one_valid_previous_edition(self):
+        self.build()
+        old = (self.root / "geo.sqlite3").read_bytes()
+        for month in ["2026-10", "2026-11"]:
+            new = self.root / "candidate.sqlite3"
+            with sqlite3.connect(new) as db:
+                update.create_schema(db)
+                db.execute("INSERT INTO metadata VALUES('month',?)", (month,))
+            update.publish(new, self.root / "geo.sqlite3")
+            self.assertEqual((self.root / "geo.previous.sqlite3").read_bytes(), old)
+            self.assertEqual(update.current_month(self.root / "geo.sqlite3"), month)
+            old = (self.root / "geo.sqlite3").read_bytes()
+        self.assertEqual(len(list(self.root.glob("geo*.sqlite3"))), 2)
+
+    def test_scratch_cleanup_ignores_recent_data_and_symlinks(self):
+        old = self.root / ".ipdata-abandoned"
+        old.mkdir()
+        (old / "download.csv.gz").write_bytes(b"scratch")
+        age = time.time() - 3 * 86400
+        os.utime(old, (age, age))
+        recent = self.root / ".ipdata-active"
+        recent.mkdir()
+        target = self.root / "unrelated"
+        target.mkdir()
+        link = self.root / ".ipdata-link"
+        link.symlink_to(target)
+        os.utime(link, (age, age), follow_symlinks=False)
+        self.assertEqual(update.clean_scratch(self.root), 1)
+        self.assertTrue(recent.exists())
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(target.exists())
+
+    def test_concurrent_update_is_locked_and_check_status_is_persistent(self):
+        with (self.root / ".update.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                update.update(self.root)
+        with patch.object(update, "_update", return_value={"result": "current"}):
+            update.update(self.root)
+        state = json.loads((self.root / "status.json").read_text())
+        self.assertEqual(state["result"], "current")
+        self.assertTrue(state["last_success"])
+        self.assertTrue(state["last_check_finished"])
 
     def test_new_data_invalidates_cached_dns_only_metadata(self):
         cache = ip_enrichment.IPContext()

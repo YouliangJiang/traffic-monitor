@@ -4,6 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+LogNamespace=traffic-security
 Type=oneshot
 User=trafficmon
 Group=trafficmon
@@ -26,4 +27,3 @@ ProtectSystem=strict
 ProtectHome=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
-

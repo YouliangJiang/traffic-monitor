@@ -10,6 +10,11 @@ if [[ ! -d /run/systemd/system ]]; then
     echo "this installer requires systemd" >&2
     exit 2
 fi
+task_systemd_version=$(systemctl --version | sed -n '1s/^systemd \([0-9]*\).*/\1/p')
+if [[ ! "$task_systemd_version" =~ ^[0-9]+$ ]] || (( task_systemd_version < 249 )); then
+    echo "this installer requires systemd 249+ for scoped project journals" >&2
+    exit 2
+fi
 
 ROLE=hub
 HUB_URL_FLAG=
@@ -56,12 +61,13 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" && ! -f 
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in ip_enrichment.py ip_data.py update_ip_data.py data/ip-rules.json security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
+for required in maintenance.py ip_enrichment.py ip_data.py update_ip_data.py data/ip-rules.json data/journald-traffic-security.conf data/journald-traffic-security-limits.conf security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
     locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer \
     systemd/traffic-cut.service systemd/traffic-cut.path \
-    systemd/traffic-cut-reconcile.service systemd/traffic-cut.timer; do
+    systemd/traffic-cut-reconcile.service systemd/traffic-cut.timer \
+    systemd/traffic-maintenance.service systemd/traffic-maintenance.timer systemd/traffic-journal-clean.service; do
     if [[ ! -f "$bundle_dir/$required" ]]; then
         echo "bundle is missing $required" >&2
         exit 4
@@ -303,7 +309,7 @@ if explicit_cap or explicit_reset:
         bill["from_install"] = pushed
         util.save_json(bill_path, bill)
 
-release_files = sorted(bundle.glob("*.py")) + sorted((bundle / "locales").glob("*.json")) + sorted((bundle / "systemd").iterdir()) + sorted((bundle / "data").glob("*.json"))
+release_files = sorted(bundle.glob("*.py")) + sorted((bundle / "locales").glob("*.json")) + sorted((bundle / "systemd").iterdir()) + sorted((bundle / "data").iterdir())
 identity = hashlib.sha256()
 for src in release_files:
     identity.update(str(src.relative_to(bundle)).encode())
@@ -343,6 +349,18 @@ for src in (bundle / "systemd").iterdir():
     fd, temporary = tempfile.mkstemp(prefix=".traffic-unit-", dir=destination.parent)
     with os.fdopen(fd, "wb") as output:
         output.write(src.read_bytes())
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, destination)
+for name, destination in [
+    ("journald-traffic-security.conf", pathlib.Path("/etc/systemd/journald@traffic-security.conf")),
+    ("journald-traffic-security-limits.conf", pathlib.Path("/etc/systemd/system/systemd-journald@traffic-security.service.d/limits.conf")),
+]:
+    destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if destination.is_symlink() or destination.parent.is_symlink():
+        raise SystemExit("unsafe project journal configuration")
+    fd, temporary = tempfile.mkstemp(prefix=".traffic-journal-", dir=destination.parent)
+    with os.fdopen(fd, "wb") as output:
+        output.write((bundle / "data" / name).read_bytes())
     os.chmod(temporary, 0o644)
     os.replace(temporary, destination)
 root_state = pathlib.Path("/var/lib/traffic-monitor-cut")
@@ -385,10 +403,14 @@ if command -v restorecon >/dev/null 2>&1; then
     restorecon -Rv /opt/traffic-monitor /var/lib/traffic-monitor \
         /etc/systemd/system/traffic-*.service \
         /etc/systemd/system/traffic-*.timer \
-        /etc/systemd/system/traffic-*.path >/dev/null || true
+        /etc/systemd/system/traffic-*.path \
+        /etc/systemd/journald@traffic-security.conf \
+        /etc/systemd/system/systemd-journald@traffic-security.service.d >/dev/null || true
 fi
 
 systemctl daemon-reload
+systemctl try-restart systemd-journald@traffic-security.service
+systemctl enable --now traffic-maintenance.timer
 systemctl disable traffic-cut.service >/dev/null 2>&1 || true
 systemctl enable traffic-cut.path traffic-cut.timer >/dev/null
 systemctl restart traffic-cut.path
@@ -406,6 +428,7 @@ else
     systemctl enable --now traffic-agent.service
     systemctl restart traffic-agent.service
 fi
+systemctl start traffic-maintenance.service
 
 echo "role=$ROLE"
 if [[ "$ROLE" == hub ]]; then

@@ -214,7 +214,8 @@ class EventReader:
             )
 
     def scan(self):
-        files = list(self.path.parent.glob(self.path.name + ".[0-9]*")) + [self.path]
+        files = (list(self.path.parent.glob(self.path.name + ".[0-9]*"))
+                 + list(self.path.parent.glob(self.path.name + "-[0-9]*")) + [self.path])
         files = [
             p
             for p in files
@@ -477,7 +478,8 @@ class EventStore:
                 "INSERT OR REPLACE INTO sensors VALUES(?,?,?)",
                 (node, now, json.dumps(status, separators=(",", ":"))),
             )
-            db.execute("DELETE FROM events WHERE received<?", (now - 30 * 86400,))
+            cutoff = now - 30 * 86400
+            db.execute("DELETE FROM events WHERE observed<? OR received<?", (cutoff, cutoff))
             db.execute("COMMIT")
         self.enrich(
             [value for value in clean if value["severity"] in {"high", "medium"}]

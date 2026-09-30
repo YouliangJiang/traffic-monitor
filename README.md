@@ -167,6 +167,29 @@ Hub 的 `traffic-ipdata.timer` 每天新加坡时间 04:00 检查 DB-IP Lite 国
 供应方按月发布；流式导入 SQLite、校验后原子替换，失败保留旧库。运行时只读区间索引，
 数据库缓存 1 MiB，不引入 pip 依赖。首次部署可运行 `systemctl start traffic-ipdata.service`。
 数据位于 `/var/lib/traffic-monitor-ipdata/geo.sqlite3`，版本更新自动使 IP 缓存刷新。
+每次成功发布保留一个 `geo.previous.sqlite3`，更新失败不替换当前库；不会降级到更早版本。
+`status.json` 记录最近检查、成功时间、当前/上一版月份及失败类型，更新有文件锁防止并发。
+每天检查同时清理超过 48 小时的异常退出临时下载，只保留当前版和上一版数据库。
+
+安全历史按 30 天滚动：`traffic-maintenance.timer` 每天新加坡时间 03:00 独立清理
+汇总事件、过期上报队列、旧读取游标、闲置 IP 缓存和集成迁移备份，即使没有新事件也执行。
+事件按实际发生时间保留，迟到的旧记录不会再延长保存期。最近一次结果写入
+`/var/lib/traffic-monitor/maintenance-status.json`；过期队列计数保存在 `retention_expired`。
+SQLite 回收达到 8 MiB 且占数据库 20% 的空闲页时，会在磁盘空间足够的情况下压缩数据库。
+流量计费账本仍保留原有 400 天历史策略。
+
+本项目与 XrayHoneypot 的运行日志使用独立 `traffic-security` journal namespace，
+最长保留 30 天、单文件每天或到 8 MiB 轮转、每台总量上限 256 MiB；繁忙时容量限制可能提前淘汰旧运行日志。
+每日清理会强制轮转并回收超过 30 天的 journal，配置只作用于此 namespace。
+配置路径为 `/etc/systemd/journald@traffic-security.conf`，要求 systemd 249+。
+查看运行日志、清理状态与地理库状态：
+
+```bash
+sudo journalctl --namespace=traffic-security -u traffic-hub.service -n 50
+systemctl list-timers traffic-ipdata.timer traffic-maintenance.timer
+sudo cat /var/lib/traffic-monitor-ipdata/status.json
+sudo cat /var/lib/traffic-monitor/maintenance-status.json
+```
 
 国家显示名称、云／托管网络推测规则和扫描域名在独立 `data/ip-rules.json`，
 运行时优先读取数据目录的 `rules.json`。公开 Censys 扫描网段由更新任务定期同步；
@@ -209,6 +232,9 @@ Hub 的 `traffic-ipdata.timer` 每天新加坡时间 04:00 检查 DB-IP Lite 国
 | `traffic-agent` | 96M | 仅 agent |
 | `traffic-monitor.timer` | 48M oneshot | 日报 |
 | `traffic-cut` | 32M oneshot | 套餐断流（root，nft） |
+| `traffic-ipdata` | 64M oneshot | 地理库流式更新，只在 Hub 启用 |
+| `traffic-maintenance` | 48M oneshot | 每日安全历史清理 |
+| `systemd-journald@traffic-security` | 64M | 两个项目共用，通常远低于上限 |
 
 状态目录：`/var/lib/traffic-monitor`。代码安装到 `/opt/traffic-monitor`。
 

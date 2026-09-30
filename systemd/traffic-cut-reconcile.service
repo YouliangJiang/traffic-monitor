@@ -4,6 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+LogNamespace=traffic-security
 Type=oneshot
 EnvironmentFile=-/etc/traffic-monitor.env
 WorkingDirectory=/opt/traffic-monitor

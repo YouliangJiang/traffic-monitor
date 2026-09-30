@@ -4,6 +4,7 @@ After=network-online.target traffic-hub.service
 Wants=network-online.target traffic-hub.service
 
 [Service]
+LogNamespace=traffic-security
 Type=simple
 User=trafficmon
 Group=trafficmon

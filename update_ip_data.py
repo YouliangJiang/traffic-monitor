@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 import csv
+import fcntl
 from datetime import datetime, timezone, timedelta
 import gzip
 import hashlib
@@ -16,14 +17,69 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
+import stat
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import ip_data
 
 MAX_DOWNLOAD = 64 * 1024 * 1024
 MAX_ROWS = 4_000_000
+
+
+def atomic_json(path, value):
+    fd, name = tempfile.mkstemp(prefix="." + path.name + "-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as output:
+            json.dump(value, output, ensure_ascii=False, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(name, 0o640)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def clean_scratch(directory, now=None):
+    """Only remove abandoned updater-owned scratch; retain the two DB editions."""
+    cutoff = (time.time() if now is None else now) - 2 * 86400
+    removed = 0
+    for path in directory.iterdir():
+        if not re.fullmatch(r"\.(ipdata|rules|status\.json|geo-previous)-[A-Za-z0-9_-]+", path.name):
+            continue
+        info = path.lstat()
+        if info.st_uid != directory.stat().st_uid or info.st_mtime >= cutoff:
+            continue
+        if stat.S_ISDIR(info.st_mode) and path.name.startswith(".ipdata-"):
+            shutil.rmtree(path)
+        elif stat.S_ISREG(info.st_mode):
+            path.unlink()
+        else:
+            continue
+        removed += 1
+    return removed
+
+
+def publish(temporary, destination):
+    """Keep one valid previous inode before atomically publishing the new edition."""
+    if current_month(destination):
+        with closing(ip_data.connect(destination)) as db:
+            if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise ValueError("existing IP database integrity failed")
+        fd, name = tempfile.mkstemp(prefix=".geo-previous-", dir=destination.parent)
+        os.close(fd)
+        os.unlink(name)
+        try:
+            os.link(destination, name, follow_symlinks=False)
+            os.replace(name, destination.with_name("geo.previous.sqlite3"))
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+    os.replace(temporary, destination)
 
 
 def request(url):
@@ -137,6 +193,7 @@ def refresh_rules(directory):
         (source if source.is_file() else ip_data.bundled_rules()).read_text()
     )
     url = value["sources"]["censys_ranges"]
+    result = {"status": "updated"}
     try:
         with request(url) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
@@ -163,36 +220,61 @@ def refresh_rules(directory):
         ]
         value["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     except Exception as exc:
+        result = {"status": "retained", "error": type(exc).__name__}
         print(
             "Scanner range refresh retained prior rules:",
             type(exc).__name__,
             flush=True,
         )
-    fd, name = tempfile.mkstemp(prefix=".rules-", dir=directory)
-    try:
-        with os.fdopen(fd, "w") as output:
-            json.dump(value, output, ensure_ascii=False, indent=2)
-            output.flush()
-            os.fsync(output.fileno())
-        os.chmod(name, 0o640)
-        os.replace(name, directory / "rules.json")
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+        if source.is_file():
+            return result
+    atomic_json(directory / "rules.json", value)
+    return result
 
 
 def update(directory):
     directory.mkdir(mode=0o750, parents=True, exist_ok=True)
     if directory.is_symlink():
         raise ValueError("unsafe IP data directory")
+    fd = os.open(directory / ".update.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o640)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        clean_scratch(directory)
+        prior = {}
+        status_path = directory / "status.json"
+        if status_path.is_file() and not status_path.is_symlink():
+            try:
+                value = json.loads(status_path.read_text())
+                prior = value if isinstance(value, dict) else {}
+            except (OSError, ValueError):
+                pass
+        started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        state = {"schema_version": 1, "last_check_started": started,
+                 "last_success": prior.get("last_success"), "result": "running"}
+        atomic_json(status_path, state)
+        try:
+            state.update(_update(directory))
+            state["last_success"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        except Exception as exc:
+            state.update(result="error", error=type(exc).__name__)
+            raise
+        finally:
+            state["last_check_finished"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            state["current_month"] = current_month(directory / "geo.sqlite3")
+            state["previous_month"] = current_month(directory / "geo.previous.sqlite3")
+            atomic_json(status_path, state)
+        return state
+
+
+def _update(directory):
     destination = directory / "geo.sqlite3"
     now = datetime.now(timezone.utc)
     month = now.strftime("%Y-%m")
     existing = current_month(destination)
-    if existing == month:
-        refresh_rules(directory)
+    if existing and existing >= month:
+        rules = refresh_rules(directory)
         print("IP database already current:", month)
-        return
+        return {"result": "current", "rules": rules}
     candidates = [month, (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")]
     with tempfile.TemporaryDirectory(prefix=".ipdata-", dir=directory) as scratch:
         scratch = Path(scratch)
@@ -212,12 +294,12 @@ def update(directory):
                     raise
         if chosen is None:
             if existing:
-                refresh_rules(directory)
+                rules = refresh_rules(directory)
                 print(
                     "Newest edition not yet available; prior database retained:",
                     existing,
                 )
-                return
+                return {"result": "waiting_for_edition", "rules": rules}
             raise RuntimeError("no IP database edition available")
         temporary = scratch / "geo.sqlite3"
         with sqlite3.connect(str(temporary)) as db:
@@ -252,13 +334,13 @@ def update(directory):
         os.chmod(temporary, 0o640)
         with temporary.open("rb") as data:
             os.fsync(data.fileno())
-        os.replace(temporary, destination)
+        publish(temporary, destination)
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
-    refresh_rules(directory)
+    rules = refresh_rules(directory)
     print(
         "Published local IP database:",
         chosen,
@@ -266,6 +348,7 @@ def update(directory):
         destination.stat().st_size,
         flush=True,
     )
+    return {"result": "updated", "rules": rules}
 
 
 if __name__ == "__main__":

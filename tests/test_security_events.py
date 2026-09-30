@@ -95,6 +95,19 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(len(reader.batch()), 1)
         self.assertEqual(reader.status()["reader_counters"]["malformed"], 2)
 
+    def test_dated_rotation_keeps_the_inode_cursor_and_unread_evidence(self):
+        log = self.root / "events.jsonl"
+        log.write_text(json.dumps(event()) + "\n")
+        reader = self.reader()
+        reader.scan()
+        reader.acknowledge(["a" * 32])
+        with log.open("a") as output:
+            output.write(json.dumps(event("b" * 32)) + "\n")
+        log.rename(self.root / "events.jsonl-20261001-000000")
+        log.write_text(json.dumps(event("c" * 32)) + "\n")
+        reader.scan()
+        self.assertEqual({item["event_id"] for item in reader.batch()}, {"b" * 32, "c" * 32})
+
     def test_backfill_marker_survives_multiple_scans(self):
         (self.root / "events.jsonl").write_text(
             "".join(json.dumps(event(f"{i:032x}")) + "\n" for i in range(200))

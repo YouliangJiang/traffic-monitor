@@ -45,6 +45,9 @@ for name in ['traffic-monitor.env','traffic-monitor-agents.json']:
 units=backup/'units';units.mkdir()
 for p in Path('/etc/systemd/system').glob('traffic-*'):
  if p.is_file():shutil.copy2(p,units/p.name)
+extra=backup/'journal';extra.mkdir()
+for name,path in [('config','/etc/systemd/journald@traffic-security.conf'),('limits','/etc/systemd/system/systemd-journald@traffic-security.service.d/limits.conf')]:
+ if Path(path).is_file():shutil.copy2(path,extra/name)
 print(json.dumps({'backup':str(backup)}))
 '''
 
@@ -70,7 +73,15 @@ ROLLBACK = '''from pathlib import Path
 import json,sys,subprocess,shutil,os,tempfile,grp
 request=json.load(sys.stdin);backup=Path(request['backup'])
 if backup.parent!=Path('/var/backups/traffic-monitor'):raise RuntimeError('invalid backup path')
-subprocess.run(['systemctl','stop','traffic-hub.service','traffic-bot.service','traffic-agent.service','traffic-cut.path','traffic-cut.timer','traffic-ipdata.service','traffic-ipdata.timer'],check=False,capture_output=True)
+subprocess.run(['systemctl','stop','traffic-hub.service','traffic-bot.service','traffic-agent.service','traffic-cut.path','traffic-cut.timer','traffic-ipdata.service','traffic-ipdata.timer','traffic-maintenance.timer','traffic-maintenance.service','traffic-journal-clean.service'],check=False,capture_output=True)
+for name,path in [('config','/etc/systemd/journald@traffic-security.conf'),('limits','/etc/systemd/system/systemd-journald@traffic-security.service.d/limits.conf')]:
+ original=backup/'journal'/name;destination=Path(path)
+ if original.is_file():destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,destination)
+ elif destination.is_file():destination.unlink()
+if not (backup/'units'/'traffic-maintenance.timer').exists():
+ subprocess.run(['systemctl','disable','traffic-maintenance.timer'],check=False,capture_output=True)
+for p in Path('/etc/systemd/system').glob('traffic-*'):
+ if not (backup/'units'/p.name).exists() and p.is_file():p.unlink()
 if not (backup/'code').exists():
  for p in Path('/etc/systemd/system').glob('traffic-*'):
   if not (backup/'units'/p.name).exists() and p.is_file():p.unlink()
@@ -81,6 +92,7 @@ if not (backup/'code').exists():
  current=Path('/opt/traffic-monitor')
  if current.is_symlink():current.unlink()
  subprocess.run(['systemctl','daemon-reload'],check=True)
+ subprocess.run(['systemctl','try-restart','systemd-journald@traffic-security.service'],check=False)
  print(json.dumps({'rolled_back':True}));raise SystemExit(0)
 release=Path('/opt/traffic-monitor-releases')/('rollback-'+backup.name)
 if not release.exists():shutil.copytree(backup/'code',release)
@@ -92,33 +104,40 @@ for name in ['traffic-monitor.env','traffic-monitor-agents.json']:
  if p.exists():shutil.copy2(p,Path('/etc')/name)
 for p in (backup/'units').iterdir():shutil.copy2(p,Path('/etc/systemd/system')/p.name)
 subprocess.run(['systemctl','daemon-reload'],check=True)
+subprocess.run(['systemctl','try-restart','systemd-journald@traffic-security.service'],check=False)
 role=request['role'];units=['traffic-hub.service','traffic-bot.service','traffic-monitor.timer'] if role=='hub' else ['traffic-agent.service']
 if role=='hub' and (backup/'units'/'traffic-ipdata.timer').is_file():units.append('traffic-ipdata.timer')
+if (backup/'units'/'traffic-maintenance.timer').is_file():units.append('traffic-maintenance.timer')
 subprocess.run(['systemctl','restart']+units+['traffic-cut.path','traffic-cut.timer'],check=True)
 print(json.dumps({'rolled_back':True}))
 '''
 
 HEALTH = '''from pathlib import Path
-import json,os,subprocess,sys,sqlite3,time
+from contextlib import closing
+import json,os,pwd,subprocess,sys,sqlite3,time
 request=json.load(sys.stdin);role=request['role'];code=Path('/opt/traffic-monitor')
 config={}
 for line in Path('/etc/traffic-monitor.env').read_text().splitlines():
  if line and not line.startswith('#') and '=' in line:
   k,v=line.split('=',1);config[k]=v.strip().strip('"').strip("'")
 os.environ.update(config);sys.path.insert(0,str(code))
+owner=pwd.getpwnam('trafficmon');os.initgroups(owner.pw_name,owner.pw_gid);os.setgid(owner.pw_gid);os.setuid(owner.pw_uid)
 import report,util
-units=['traffic-hub.service','traffic-bot.service'] if role=='hub' else ['traffic-agent.service']
+units=(['traffic-hub.service','traffic-bot.service','traffic-ipdata.timer'] if role=='hub' else ['traffic-agent.service'])+['traffic-maintenance.timer','systemd-journald@traffic-security.service']
 active=all(subprocess.run(['systemctl','is-active','--quiet',unit]).returncode==0 for unit in units)
 ledger=Path('/var/lib/traffic-monitor/traffic.sqlite3');fresh=False
 if ledger.exists():
- with sqlite3.connect(str(ledger)) as db:
+ with closing(sqlite3.connect(ledger.as_uri()+'?mode=ro',uri=True)) as db:
   row=db.execute('SELECT value FROM metadata WHERE id=1').fetchone()
   fresh=bool(row and time.time()-report.parse_iso_datetime(json.loads(row[0])['last_ts']).timestamp()<60)
 api=True
 if role=='hub':
  try:api=util.http_json('GET',config['HUB_URL']+'/healthz',config['ADMIN_TOKEN'],timeout=5).get('ok') is True
  except Exception:api=False
-print(json.dumps({'ok':active and fresh and api,'role':role,'node':config['NODE_NAME'],'active':active,'ledger_fresh':fresh,'api_ready':api,'release':(code/'release-id').read_text().strip()}))
+retention=all(subprocess.check_output(['systemctl','show',unit,'--property=Result','--value'],text=True).strip()=='success' for unit in ['traffic-maintenance.service','traffic-journal-clean.service'])
+state=util.load_json(Path('/var/lib/traffic-monitor/maintenance-status.json'))
+retention=retention and state.get('retention_days')==30 and state.get('errors')=={} and time.time()-report.parse_iso_datetime(state['finished_at']).timestamp()<600
+print(json.dumps({'ok':active and fresh and api and retention,'role':role,'node':config['NODE_NAME'],'active':active,'ledger_fresh':fresh,'api_ready':api,'retention_ready':retention,'release':(code/'release-id').read_text().strip()}))
 '''
 
 
@@ -134,6 +153,8 @@ def main():
     parser.add_argument('--iface')
     parser.add_argument('--security-provider', choices=['xray_honeypot','off'])
     args=parser.parse_args()
+    for name in ['READ_INFO','BACKUP','UPDATE_ENV','ROLLBACK','HEALTH']:
+        compile(globals()[name], name, 'exec')
     settings={}
     local=ROOT/'deploy.local'
     if local.exists():
