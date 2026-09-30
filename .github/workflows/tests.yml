@@ -12,4 +12,4 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
-      - run: bash -n install-host.sh deploy-remote.sh
+      - run: bash -n install.sh

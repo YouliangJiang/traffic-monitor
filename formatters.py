@@ -1,392 +1,79 @@
 #!/usr/bin/env python3
-"""Telegram HTML formatters for fleet and node views."""
+"""Telegram HTML text for the daily summary and anomaly alerts."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any
 
-import hostinfo
 import i18n
 import report
 import util
+from report import fmt_bytes, h
 
 
-def _short_bytes(n: int) -> str:
-    n = int(n)
-    if n >= 1_000_000_000_000:
-        return f"{n / 1_000_000_000_000:5.2f}T"
-    if n >= 1_000_000_000:
-        return f"{n / 1_000_000_000:5.1f}G"
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:5.0f}M"
-    return f"{n:5d}B"
+def duration(seconds: float) -> str:
+    s = int(max(0, seconds))
+    days, s = divmod(s, 86400)
+    hours, s = divmod(s, 3600)
+    if days:
+        return i18n.t("dur.d", days=days, hours=hours)
+    if hours:
+        return i18n.t("dur.h", hours=hours, minutes=s // 60)
+    return i18n.t("dur.m", minutes=s // 60)
 
 
-def _mem_pct(snap: dict[str, Any]) -> float:
-    total = float(snap.get("mem_total") or 0)
-    avail = float(snap.get("mem_available") or 0)
-    if total <= 0:
-        return 0.0
-    return max(0.0, min(100.0, 100.0 * (total - avail) / total))
+def mem_pct(snap: dict[str, Any]) -> float:
+    return report.pct(snap["mem_total"] - snap["mem_available"], snap["mem_total"])
 
 
-def _status(row: dict[str, Any]) -> str:
-    if not row.get("enabled", True):
-        return "off"
-    if row.get("online"):
-        return "on"
-    return "stale"
+def disk_pct(snap: dict[str, Any]) -> float:
+    # Same basis as df: used / (used + available to unprivileged users).
+    return report.pct(snap["disk_used"], snap["disk_used"] + snap["disk_avail"])
 
 
-def fleet_overview(rows: list[dict[str, Any]], title: Optional[str] = None) -> str:
-    title = title or i18n.t("fleet.title")
-    if not rows:
-        return i18n.t("fleet.empty", title=title)
+def period_used(snap: dict[str, Any]) -> int:
+    return snap["period_rx"] + snap["period_tx"]
+
+
+def _bound(text: str) -> str:
+    try:
+        return datetime.fromisoformat(text).astimezone(util.local_tz()).strftime("%m-%d %H:%M")
+    except ValueError:
+        return text
+
+
+def node_block(row: dict[str, Any]) -> str:
+    name, snap, age = h(row["name"]), row.get("snapshot"), row.get("age")
+    if not snap:
+        return i18n.t("node.never", name=name)
+    head = i18n.t("node.online", name=name) if row["online"] else i18n.t("node.offline", name=name, ago=duration(age or 0))
     lines = [
-        f"{'node':<14} {'used':>7} {'cap':>6} {'pct':>5} {'cpu':>4} {'mem':>4} st",
-        "-" * 50,
+        head,
+        i18n.t("node.resources", cpu=f"{snap['cpu_pct']:.0f}", mem=f"{mem_pct(snap):.0f}",
+               disk=f"{disk_pct(snap):.0f}", uptime=duration(snap["uptime_sec"])),
     ]
-    used_all = 0
-    capped = 0
-    online = 0
-    for row in rows:
-        snap = row.get("snapshot") or {}
-        used = int(row.get("used") or 0)
-        used_all += used
-        cap = row.get("cap_bytes")
-        if cap:
-            capped += cap
-        pct = row.get("pct")
-        pct_s = f"{pct:4.0f}%" if pct is not None else "   --"
-        cpu = float(snap.get("cpu_pct") or 0)
-        mem = _mem_pct(snap)
-        cap_s = "    ∞" if not cap else _short_bytes(cap)
-        lines.append(
-            f"{row['name'][:14]:<14} {_short_bytes(used):>7} {cap_s:>6} {pct_s:>5} "
-            f"{cpu:3.0f}% {mem:3.0f}% {_status(row):>4}"
-        )
-        if row.get("online") and row.get("enabled", True):
-            online += 1
-    cap_line = i18n.t("fleet.unlimited") if not capped else report.fmt_bytes(capped)
-    return (
-        f"{title}\n"
-        f"{i18n.t('fleet.summary', online=online, total=len(rows), cap=cap_line, used=report.fmt_bytes(used_all))}\n\n"
-        f"<pre>" + "\n".join(lines) + "</pre>\n\n"
-        f"{i18n.t('fleet.hint')}"
-    )
-
-
-
-def _svc_specs(row: dict[str, Any]) -> list[dict[str, Any]]:
-    return list(row.get("svc") or [])
-
-
-def _svc_result(row: dict[str, Any], name: str) -> dict[str, Any]:
-    snap = row.get("snapshot") or {}
-    for item in snap.get("svc") or []:
-        if item.get("name") == name:
-            return item
-    return {}
-
-
-def svc_line(row: dict[str, Any]) -> str:
-    specs = _svc_specs(row)
-    if not specs:
-        return ""
-    bits = []
-    for spec in specs:
-        name = spec.get("name") or ""
-        got = _svc_result(row, name)
-        ports = got.get("ports") or [{"port": p, "ok": None} for p in spec.get("ports") or []]
-        marks = []
-        for item in ports:
-            ok = item.get("ok")
-            mark = "✅" if ok else ("…" if ok is None else "❌")
-            marks.append(f"{mark}{item.get('port')}")
-        bits.append(f"{name} " + " ".join(marks))
-    return "SVC " + " · ".join(bits)
-
-
-def svc_block(row: dict[str, Any], svc_name: str) -> str:
-    specs = [s for s in _svc_specs(row) if s.get("name") == svc_name]
-    if not specs:
-        return i18n.t("svc.not_on_node", name=report.h(row.get("name") or ""), svc=report.h(svc_name))
-    spec = specs[0]
-    got = _svc_result(row, svc_name)
-    ports = got.get("ports") or [{"port": p, "ok": None} for p in spec.get("ports") or []]
-    lines = []
-    for item in ports:
-        ok = item.get("ok")
-        if ok is True:
-            lines.append(i18n.t("svc.port_ok", port=item.get("port")))
-        elif ok is False:
-            lines.append(i18n.t("svc.port_down", port=item.get("port")))
-        else:
-            lines.append(i18n.t("svc.port_wait", port=item.get("port")))
-    rss = int(got.get("rss") or 0)
-    rss_s = hostinfo.fmt_mib(rss) if rss else i18n.t("host.no_proc")
-    overall = i18n.t("svc.ok") if got.get("ok") else i18n.t("svc.down")
-    if got.get("ok") is None and not got:
-        overall = i18n.t("svc.wait")
-    return i18n.t(
-        "svc.block",
-        name=report.h(row.get("name") or ""),
-        svc=report.h(svc_name),
-        status=overall,
-        ports="\n".join(lines),
-        rss=rss_s,
-        proc=report.h(spec.get("proc") or svc_name),
-    )
-
-
-def first_svc_name(row: dict[str, Any]) -> str:
-    specs = _svc_specs(row)
-    for spec in specs:
-        name = str(spec.get("name") or "")
-        if name:
-            return name
-    return ""
-
-def node_detail(row: dict[str, Any]) -> str:
-    snap = row.get("snapshot") or {}
-    if not snap:
-        return i18n.t("node.no_heartbeat", name=report.h(row["name"]))
-    cap = row.get("cap_bytes")
-    used = int(row.get("used") or 0)
-    pct = row.get("pct")
+    if not snap["traffic_ok"]:
+        lines.append(i18n.t("node.traffic_error", error=h(snap["traffic_error"])))
+        return "\n".join(lines)
+    lines.append(i18n.t("node.traffic", yesterday=fmt_bytes(snap["yesterday_rx"] + snap["yesterday_tx"]),
+                        today=fmt_bytes(snap["today_rx"] + snap["today_tx"])))
+    used, cap = period_used(snap), snap.get("cap_bytes")
     if cap:
-        table = "\n".join(
-            [
-                i18n.t("node.traffic"),
-                i18n.t("pre.row_in", label=i18n.t("node.in"), value=report.fmt_gb(int(snap.get("period_rx") or 0))),
-                i18n.t("pre.row_out", label=i18n.t("node.out"), value=report.fmt_gb(int(snap.get("period_tx") or 0))),
-                i18n.t("pre.row_total", label=i18n.t("node.total"), value=report.fmt_gb(used)),
-                i18n.t(
-                    "report.quota",
-                    used=report.fmt_gb_num(used),
-                    cap=int(round(cap / 1_000_000_000)),
-                    pct=pct or 0,
-                ),
-            ]
-        )
-        bar = f"{report.progress_bar(pct or 0)} {(pct or 0):.1f}%\n"
-        cut_info = snap.get("cut") or {}
-        if not row.get("reset_set", True):
-            cap_note = i18n.t("node.cut_needs_reset")
-        elif cut_info.get("want") == "cut" and cut_info.get("ok") is False:
-            cap_note = i18n.t("node.cut_failed")
-        elif cut_info.get("applied") == "cut" and cut_info.get("ok") is True:
-            cap_note = i18n.t("node.cut_active")
-        elif cut_info.get("want") == "cut":
-            cap_note = i18n.t("node.cut_pending")
-        elif (pct or 0) < 100:
-            cap_note = i18n.t("node.in_plan")
-        else:
-            cap_note = i18n.t("node.over_plan")
+        lines.append(i18n.t("node.period_capped", used=fmt_bytes(used), cap=fmt_bytes(cap), pct=f"{report.pct(used, cap):.1f}"))
     else:
-        table = "\n".join(
-            [
-                i18n.t("node.traffic_unlimited"),
-                i18n.t("pre.row_in", label=i18n.t("node.in"), value=report.fmt_gb(int(snap.get("period_rx") or 0))),
-                i18n.t("pre.row_out", label=i18n.t("node.out"), value=report.fmt_gb(int(snap.get("period_tx") or 0))),
-                i18n.t("pre.row_total", label=i18n.t("node.total"), value=report.fmt_gb(used)),
-            ]
-        )
-        bar = ""
-        cap_note = i18n.t("node.unlimited_note")
-    mem_used = int(snap.get("mem_total") or 0) - int(snap.get("mem_available") or 0)
-    mem_total = int(snap.get("mem_total") or 0)
-    net_extra = ""
-    if snap.get("net_window_sec"):
-        net_extra = "  " + str(int(round(float(snap.get("net_window_sec") or 0)))) + "s"
-    extra_svc = svc_line(row)
-    extra_svc = ("\n" + extra_svc) if extra_svc else ""
-    return (
-        i18n.t("node.header", name=report.h(row["name"]), status=_status(row)) + "\n"
-        + i18n.t(
-            "node.meta",
-            period=i18n.t("node.period"),
-            start=report.h(report.fmt_period_bound(snap.get("period_start"))),
-            end=report.h(report.fmt_period_bound(snap.get("period_end"))),
-            reset_label=i18n.t("node.reset"),
-            reset=report.h(
-                i18n.t("node.reset_unset")
-                if not row.get("reset_set", True)
-                else util.format_reset(int(row.get("reset_day") or 1), str(row.get("reset_time") or snap.get("reset_time") or "00:00:00"))
-            ),
-            nic=i18n.t("node.nic"),
-            iface=report.h(row.get("iface") or snap.get("iface")),
-        )
-        + "\n\n"
-        + f"<pre>{table}</pre>\n"
-        + bar
-        + f"{cap_note}\n\n"
-        + f"CPU {float(snap.get('cpu_pct') or 0):.0f}%  "
-        + f"MEM {hostinfo.fmt_mib(mem_used)}/{hostinfo.fmt_mib(mem_total)}  "
-        + f"DISK {report.fmt_bytes(int(snap.get('disk_used') or 0))}\n"
-        + f"NET ↓{hostinfo.fmt_bps(float(snap.get('net_rx_bps') or 0))}  "
-        + f"↑{hostinfo.fmt_bps(float(snap.get('net_tx_bps') or 0))}"
-        + f"{net_extra}\n"
-        + f"up {hostinfo.fmt_duration(float(snap.get('uptime_sec') or 0))}"
-        + extra_svc
-    )
+        lines.append(i18n.t("node.period_unlimited", used=fmt_bytes(used)))
+    lines.append(i18n.t("node.period_range", start=_bound(snap["period_start"]), end=_bound(snap["period_end"])))
+    return "\n".join(lines)
 
 
-def metric_block(row: dict[str, Any], kind: str) -> str:
-    snap = row.get("snapshot") or {}
-    name = row["name"]
-    if not snap:
-        return i18n.t("node.no_data", name=report.h(name))
-    if kind == "cpu":
-        return i18n.t(
-            "metric.cpu",
-            name=report.h(name),
-            pct=float(snap.get("cpu_pct") or 0),
-            bar=report.progress_bar(float(snap.get("cpu_pct") or 0)),
-            load=float(snap.get("load1") or 0),
-            nproc=int(snap.get("nproc") or 1),
-            steal=float(snap.get("steal_pct") or 0),
-        )
-    if kind == "mem":
-        total = int(snap.get("mem_total") or 0)
-        used = total - int(snap.get("mem_available") or 0)
-        pct = _mem_pct(snap)
-        swap_used = int(snap.get("swap_total") or 0) - int(snap.get("swap_free") or 0)
-        return i18n.t(
-            "metric.mem",
-            name=report.h(name),
-            used=hostinfo.fmt_mib(used),
-            total=hostinfo.fmt_mib(total),
-            pct=pct,
-            bar=report.progress_bar(pct),
-            swap_used=hostinfo.fmt_mib(swap_used),
-            swap_total=hostinfo.fmt_mib(int(snap.get("swap_total") or 0)),
-        )
-    if kind == "disk":
-        total = int(snap.get("disk_total") or 0) or 1
-        used = int(snap.get("disk_used") or 0)
-        pct = 100.0 * used / total
-        return i18n.t(
-            "metric.disk",
-            name=report.h(name),
-            used=report.fmt_bytes(used),
-            total=report.fmt_bytes(total),
-            pct=pct,
-            bar=report.progress_bar(pct),
-            avail=report.fmt_bytes(int(snap.get("disk_avail") or 0)),
-        )
-    if kind == "net":
-        window = float(snap.get("net_window_sec") or 0)
-        window_s = i18n.t("metric.net_avg", sec=window) if window >= 1 else i18n.t("metric.net_avg_none")
-        return i18n.t(
-            "metric.net",
-            name=report.h(name),
-            rx=hostinfo.fmt_bps(float(snap.get("net_rx_bps") or 0)),
-            tx=hostinfo.fmt_bps(float(snap.get("net_tx_bps") or 0)),
-            window=f"{window_s}. {i18n.t('metric.net_hint')}",
-        )
-    if kind == "today":
-        return i18n.t(
-            "metric.today",
-            name=report.h(name),
-            rx=report.fmt_gb(int(snap.get("today_rx") or 0)),
-            tx=report.fmt_gb(int(snap.get("today_tx") or 0)),
-            total=report.fmt_gb(int(snap.get("today_total") or 0)),
-        )
-    if kind == "xray":
-        svc_name = first_svc_name(row)
-        if not svc_name:
-            return i18n.t("svc.not_configured", name=report.h(name))
-        return svc_block(row, svc_name)
-    if kind == "uptime":
-        return i18n.t(
-            "metric.uptime",
-            name=report.h(name),
-            uptime=hostinfo.fmt_duration(float(snap.get("uptime_sec") or 0)),
-            hostname=report.h(snap.get("hostname") or ""),
-        )
-    return node_detail(row)
+def daily(rows: list[dict[str, Any]], today: str) -> str:
+    title = i18n.t("daily.title", date=today)
+    if not rows:
+        return f"{title}\n\n{i18n.t('daily.empty')}"
+    online = sum(1 for row in rows if row["online"])
+    blocks = "\n\n".join(node_block(row) for row in rows)
+    return f"{title}\n{i18n.t('daily.summary', online=online, total=len(rows))}\n\n{blocks}"
 
 
-def nic_result(name: str, data: dict[str, Any], row: Optional[dict[str, Any]] = None) -> str:
-    seconds = float(data.get("seconds") or 0)
-    iface = str(data.get("iface") or (row or {}).get("iface") or "eth0")
-    return (
-        i18n.t("nic.title", name=report.h(name), seconds=seconds, iface=report.h(iface))
-        + "\n\n<pre>"
-        + i18n.t(
-            "nic.row_in",
-            bps=hostinfo.fmt_bps(float(data.get("rx_bps") or 0)),
-            nbytes=report.fmt_bytes(int(data.get("rx_bytes") or 0)),
-        )
-        + "\n"
-        + i18n.t(
-            "nic.row_out",
-            bps=hostinfo.fmt_bps(float(data.get("tx_bps") or 0)),
-            nbytes=report.fmt_bytes(int(data.get("tx_bytes") or 0)),
-        )
-        + "</pre>\n"
-        + i18n.t("nic.hint")
-    )
-
-
-def bw_result(name: str, data: dict[str, Any]) -> str:
-    rx_bps = float(data.get("rx_bps") or 0)
-    tx_bps = float(data.get("tx_bps") or 0)
-    down_sec = float(data.get("down_sec") or data.get("seconds") or 0)
-    up_sec = float(data.get("up_sec") or 0)
-    extra = ""
-    if data.get("up_error") or (tx_bps <= 0 and up_sec <= 0):
-        reason = data.get("up_error") or i18n.t("speed.up_timeout")
-        extra = i18n.t("speed.up_fail", reason=report.h(reason))
-    return (
-        i18n.t("speed.title", name=report.h(name))
-        + "\n\n<pre>"
-        + i18n.t(
-            "speed.row_down",
-            bps=hostinfo.fmt_bps(rx_bps),
-            nbytes=report.fmt_bytes(int(data.get("rx_bytes") or 0)),
-            sec=down_sec,
-        )
-        + "\n"
-        + i18n.t(
-            "speed.row_up",
-            bps=hostinfo.fmt_bps(tx_bps),
-            nbytes=report.fmt_bytes(int(data.get("tx_bytes") or 0)),
-            sec=up_sec,
-        )
-        + "\n</pre>\n"
-        + i18n.t("speed.hint")
-        + extra
-    )
-
-
-def rtt_result(name: str, data: dict[str, Any]) -> str:
-    lines = []
-    for item in data.get("regions") or []:
-        label = i18n.t(f"rtt.region.{item.get('id')}")
-        if item.get("received") and item.get("avg_ms") is not None:
-            value = f"{float(item['avg_ms']):.0f} ms"
-            loss = int(item.get("loss_pct") or 0)
-            if loss:
-                value += f"  ({loss}%)"
-        else:
-            value = i18n.t("rtt.none")
-        lines.append(f"{label}  {value}")
-    body = "\n".join(lines) if lines else i18n.t("rtt.none")
-    return (
-        i18n.t("rtt.title", name=report.h(name))
-        + "\n\n<pre>"
-        + body
-        + "</pre>\n"
-        + i18n.t("rtt.hint")
-    )
-
-
-def add_help(name: str, hub_url: str, cap_text: str, reset_day: int, reset_time: str = "00:00:00") -> str:
-    return i18n.t(
-        "add.done",
-        name=report.h(name),
-        cap=report.h(cap_text),
-        reset=report.h(util.format_reset(reset_day, reset_time)),
-        hub=report.h(hub_url),
-    )
+def alert(key: str, name: str, **extra: Any) -> str:
+    return i18n.t(key, name=h(name), **extra)

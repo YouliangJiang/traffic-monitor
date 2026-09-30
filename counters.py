@@ -2,6 +2,7 @@
 """Transactional NIC accounting; bounded-memory queries over timestamped intervals."""
 from __future__ import annotations
 
+import calendar
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -50,41 +51,6 @@ def _path() -> Path:
     return util.state_dir() / 'traffic.sqlite3'
 
 
-def _migrate(connection: sqlite3.Connection) -> None:
-    """Import the existing ledger once, in the same transaction as its baseline."""
-    if connection.execute('SELECT 1 FROM metadata WHERE id=1').fetchone():
-        return
-    legacy = util.state_dir() / 'traffic.json'
-    if not legacy.exists():
-        return
-    data = util.load_json(legacy, strict=True)
-    required = {'iface', 'boot_id', 'last_rx', 'last_tx', 'last_ts'}
-    if not required.issubset(data):
-        raise util.StateError('legacy ledger has no valid baseline')
-    minutes = dict(data.get('minutes') or {})
-    # Older releases recorded whole days. Preserve amounts not already in minutes.
-    covered: dict[str, list[int]] = {}
-    for key, entry in minutes.items():
-        total = covered.setdefault(key[:10], [0, 0])
-        total[0] += int(entry.get('rx') or 0)
-        total[1] += int(entry.get('tx') or 0)
-    for day, entry in (data.get('days') or {}).items():
-        previous = covered.get(day, [0, 0])
-        extra = [max(0, int(entry.get(k) or 0) - previous[i]) for i, k in enumerate(('rx', 'tx'))]
-        if any(extra):
-            slot = minutes.setdefault(day + 'T00:00', {'rx': 0, 'tx': 0})
-            slot['rx'] += extra[0]
-            slot['tx'] += extra[1]
-    last = _micros(datetime.fromisoformat(data['last_ts']))
-    for key, entry in minutes.items():
-        start = _micros(datetime.strptime(key, '%Y-%m-%dT%H:%M').replace(tzinfo=UTC))
-        end = min(start + 60_000_000, last) if start <= last else start + 60_000_000
-        end = max(start + 1, end)
-        connection.execute('INSERT INTO samples VALUES(?,?,?,?)', (end, start, int(entry.get('rx') or 0), int(entry.get('tx') or 0)))
-    baseline = {key: data[key] for key in required}
-    connection.execute('INSERT INTO metadata VALUES(1,?)', (json.dumps(baseline),))
-
-
 @contextmanager
 def _database():
     path = _path()
@@ -98,9 +64,6 @@ def _database():
         connection.execute('PRAGMA cache_size=-2048')
         connection.execute('CREATE TABLE IF NOT EXISTS metadata(id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
         connection.execute('CREATE TABLE IF NOT EXISTS samples(end_us INTEGER PRIMARY KEY, start_us INTEGER NOT NULL, rx INTEGER NOT NULL CHECK(rx>=0), tx INTEGER NOT NULL CHECK(tx>=0), CHECK(end_us>start_us))')
-        connection.execute('BEGIN IMMEDIATE')
-        _migrate(connection)
-        connection.execute('COMMIT')
         yield connection
     finally:
         if connection.in_transaction:
@@ -180,3 +143,46 @@ def day_rows(last_n: Optional[int] = None) -> list[tuple[date, int, int]]:
             rows.append((first, rx, tx))
             first += timedelta(days=1)
         return rows
+
+
+def _reset_at(year: int, month: int, reset_day: int, reset_time: str) -> datetime:
+    day = min(max(1, int(reset_day)), calendar.monthrange(year, month)[1])
+    hour, minute, second = (int(x) for x in util.parse_reset_time(reset_time).split(':'))
+    return datetime(year, month, day, hour, minute, second, tzinfo=util.local_tz())
+
+
+def billing_period(now: datetime, reset_day: int, reset_time: str = '00:00:00') -> tuple[datetime, datetime]:
+    """[start, end) of the billing period containing now, in the host timezone.
+
+    A reset day past the end of a short month falls on that month's last day.
+    """
+    now = _as_utc(now).astimezone(util.local_tz())
+    this = _reset_at(now.year, now.month, reset_day, reset_time)
+    if now >= this:
+        year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+        return this, _reset_at(year, month, reset_day, reset_time)
+    year, month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+    return _reset_at(year, month, reset_day, reset_time), this
+
+
+def usage(iface: str, reset_day: int, reset_time: str = '00:00:00', now: Optional[datetime] = None) -> dict[str, Any]:
+    """Record one sample, then sum the billing period, today and yesterday (host-local days)."""
+    now = _as_utc(now or datetime.now(UTC))
+    record_sample(iface, now)
+    start, end = billing_period(now, reset_day, reset_time)
+    today = now.astimezone(util.local_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = today - timedelta(days=1)
+    with _database() as connection:
+        period_rx, period_tx = _sum(connection, _micros(start), _micros(end))
+        today_rx, today_tx = _sum(connection, _micros(today), _micros(today + timedelta(days=1)))
+        yesterday_rx, yesterday_tx = _sum(connection, _micros(yesterday), _micros(today))
+    return {
+        'period_start': start.isoformat(),
+        'period_end': end.isoformat(),
+        'period_rx': period_rx,
+        'period_tx': period_tx,
+        'today_rx': today_rx,
+        'today_tx': today_tx,
+        'yesterday_rx': yesterday_rx,
+        'yesterday_tx': yesterday_tx,
+    }

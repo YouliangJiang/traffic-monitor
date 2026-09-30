@@ -1,71 +1,71 @@
 #!/usr/bin/env python3
-"""Build a compact JSON snapshot for hub heartbeats."""
+"""One node snapshot: host resources plus billing-period traffic. Shared by agent and hub."""
 from __future__ import annotations
 
+import math
+import traceback
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-import cut
+import counters
 import hostinfo
-import report
 import util
 
+INT_KEYS = (
+    "mem_total", "mem_available", "disk_total", "disk_used", "disk_avail", "nproc",
+    "period_rx", "period_tx", "today_rx", "today_tx", "yesterday_rx", "yesterday_tx",
+)
+NUM_KEYS = ("uptime_sec", "cpu_pct", "load1", "net_rx_rate", "net_tx_rate")
+TRAFFIC_KEYS = ("period_rx", "period_tx", "today_rx", "today_tx", "yesterday_rx", "yesterday_tx")
 
-def build_snapshot(
-    iface: str,
-    reset_day: int,
-    services: Optional[list[dict[str, Any]]] = None,
-    reset_time: str = "00:00:00",
-    cap: Optional[int] = None,
-    reset_set: bool = True,
-    allow_cut: bool = True,
-) -> dict[str, Any]:
-    bootstrap = util.load_json(util.state_dir() / "bootstrap.json")
-    try:
-        reset_time = util.parse_reset_time(reset_time)
-    except ValueError:
-        reset_time = "00:00:00"
-    snap = report.collect_snapshot(iface, reset_day, bootstrap, reset_time=reset_time)
-    host = hostinfo.collect_host(iface)
-    used = snap.period_rx + snap.period_tx
-    cut_state = cut.sync_desired(
-        used,
-        cap,
-        reset_day,
-        snap.period_key,
-        reset_time=reset_time,
-        reset_set=reset_set,
-        allow_cut=allow_cut,
-    )
+
+def config_from_env() -> dict[str, Any]:
+    """Billing settings for this host from /etc/traffic-monitor.env."""
     return {
-        "iface": iface,
-        "ts": snap.now.isoformat(),
-        "period_start": snap.period_start.isoformat(),
-        "period_end": snap.period_end.isoformat(),
-        "period_rx": snap.period_rx,
-        "period_tx": snap.period_tx,
-        "period_total": used,
-        "today_rx": snap.today.rx,
-        "today_tx": snap.today.tx,
-        "today_total": snap.today.total,
-        "ledger_ok": snap.ledger_ok,
-        "bootstrap_applied": snap.bootstrap_applied,
-        "cpu_pct": host.cpu_pct,
-        "steal_pct": host.steal_pct,
-        "load1": host.load1,
-        "nproc": host.nproc,
-        "mem_total": host.mem_total,
-        "mem_available": host.mem_available,
-        "swap_total": host.swap_total,
-        "swap_free": host.swap_free,
-        "disk_total": host.disk_total,
-        "disk_used": host.disk_used,
-        "disk_avail": host.disk_avail,
-        "net_rx_bps": host.net_rx_bps,
-        "net_tx_bps": host.net_tx_bps,
-        "net_window_sec": host.net_window_sec,
-        "uptime_sec": host.uptime_sec,
-        "svc": hostinfo.probe_services(services or []),
-        "hostname": host.hostname,
-        "cut": cut_state,
-        "reset_time": reset_time,
+        "iface": util.env_opt("TRAFFIC_IFACE", "eth0"),
+        "cap_bytes": util.env_int("MONTHLY_CAP_BYTES", 0) or None,
+        "reset_day": util.env_int("BILLING_RESET_DAY", 1),
+        "reset_time": util.parse_reset_time(util.env_opt("BILLING_RESET_TIME", "00:00:00")),
     }
+
+
+def build(config: dict[str, Any], now: Optional[datetime] = None) -> dict[str, Any]:
+    """Never raises for accounting failures: traffic_ok=False carries the error instead,
+    so the hub still gets resource metrics and can alert on the broken ledger."""
+    snap: dict[str, Any] = {"ts": (now or datetime.now(timezone.utc)).isoformat(), "iface": config["iface"]}
+    snap.update(hostinfo.collect(config["iface"]))
+    snap.update(cap_bytes=config["cap_bytes"], reset_day=config["reset_day"], reset_time=config["reset_time"])
+    try:
+        snap.update(counters.usage(config["iface"], config["reset_day"], config["reset_time"], now))
+        snap.update(traffic_ok=True, traffic_error="")
+    except Exception as exc:
+        traceback.print_exc()
+        snap.update({key: 0 for key in TRAFFIC_KEYS})
+        snap.update(period_start="", period_end="", traffic_ok=False, traffic_error=f"{type(exc).__name__}: {exc}"[:200])
+    return snap
+
+
+def validate(value: Any) -> dict[str, Any]:
+    """Reject malformed agent input before it reaches hub state or Telegram text."""
+    if not isinstance(value, dict):
+        raise ValueError("snapshot must be an object")
+    for key in INT_KEYS:
+        if type(value.get(key)) is not int or not 0 <= value[key] <= 2**63 - 1:
+            raise ValueError(f"invalid {key}")
+    for key in NUM_KEYS:
+        number = value.get(key)
+        if type(number) not in (int, float) or not math.isfinite(number) or number < 0:
+            raise ValueError(f"invalid {key}")
+    cap = value.get("cap_bytes")
+    if cap is not None and (type(cap) is not int or cap <= 0):
+        raise ValueError("invalid cap_bytes")
+    if type(value.get("reset_day")) is not int or not 1 <= value["reset_day"] <= 31:
+        raise ValueError("invalid reset_day")
+    if type(value.get("traffic_ok")) is not bool:
+        raise ValueError("invalid traffic_ok")
+    for key in ("ts", "iface", "hostname", "period_start", "period_end", "traffic_error", "reset_time"):
+        if not isinstance(value.get(key), str) or len(value[key]) > 200:
+            raise ValueError(f"invalid {key}")
+    if value["traffic_ok"] and not value["period_start"]:
+        raise ValueError("missing billing period")
+    return value

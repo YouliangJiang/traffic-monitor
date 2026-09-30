@@ -2,193 +2,88 @@
 
 English: [README.en.md](README.en.md)
 
-用 Telegram 看主机流量和基本状态。Python 3.9+ 标准库 + systemd，不需要 pip、额外 RPM 或 Docker。
+每台机器采集资源和月流量，上报到一台汇总节点（hub）；hub 每天推送一次汇总到 Telegram，出现异常时即时推送。Python 3.9+ 标准库 + systemd，不需要 pip 或 Docker。
 
-一个 Telegram bot token 同一时间只能有一个进程做 `getUpdates`。因此默认是一台 **hub** 收机器人消息，其他机器跑 **agent**，主动向 hub 上报。
+## 工作方式
 
-机器相关的值不要写进 git：
+- **agent**（每台被监控的机器）：每 20 秒采集 CPU、内存、磁盘、网卡速率和本机流量，通过 HTTPS 上报给 hub。
+- **hub**（汇总节点）：同样采集本机数据；接收各 agent 的上报；定时发每日汇总，出现异常时推送告警。hub 只调用 Telegram 的 `sendMessage`，不接收消息。
 
-| 位置 | 用途 |
-|---|---|
-| `/etc/traffic-monitor.env`（权限 `0600`） | 每台服务器上的 token、节点名、额度、网卡 |
-| `deploy.local`（由 `deploy.local.example` 复制，已 gitignore） | 你本机 SSH 别名、可选的 hub 地址。尽量写 SSH alias，不要写公网 IP |
-| `/var/lib/traffic-monitor/inventory.json` | 节点额度、可选服务探活。只存在 hub 本机，不要提交 |
+异常推送（每种异常只在触发时推送一次，恢复时再推送一次）：
 
-点 bot 消息下面的按钮即可，不必手打节点名。
-点消息里的「中文」/「English」可切换 bot 语言；选择会写到 `/var/lib/traffic-monitor/ui.json`，优先于环境变量 `UI_LANG`。
+| 异常 | 默认阈值 | env 变量 |
+|---|---|---|
+| 节点离线 | 超过 300 秒没有上报 | `OFFLINE_ALERT_SEC` |
+| 磁盘使用率 | ≥ 90%，降到 85% 以下算恢复 | `DISK_ALERT_PCT` |
+| 内存使用率 | ≥ 90%，降到 85% 以下算恢复 | `MEM_ALERT_PCT` |
+| 月流量 | 达到上限的 80%、90% 各推送一次（仅设置了上限的节点） | 安装时 `--cap` |
+| 流量统计异常 | 本机账本读写失败 | — |
 
-
-## 流量怎么计
-
-- 读内核 `/proc/net/dev` 指定网卡（默认 `eth0`）的收/发字节，入站和出站都记。
-- 差值按带微秒时间戳的采样区间记入 SQLite；跨周期边界按区间时长分摊，整数分摊保证总字节不丢失。数据库路径为 `/var/lib/traffic-monitor/traffic.sqlite3`。只填重置日时，时刻按 `00:00:00`。监控进程短时间挂了但机器没重启，内核计数还在，下次采样会补上。
-- 账单周期用这台机器的系统时区（`timedatectl`）。重置时刻由 `BILLING_RESET_DAY` + 可选的 `BILLING_RESET_TIME`（时:分:秒，没写的分和秒为 0，只写日期则 `00:00:00`）决定。额度按 **十进制**（`2T` = 2×10¹² 字节），与多数云厂商「套餐含入+出」的口径一致。
-- 第一次安装时会留下开机快照 `bootstrap.json`，用来补上「装监控之前、自本次开机以来」的计数。
-
-这是预警账，不是云账单对账单。重启前最后一次采样到关机之间会丢掉一小段；hypervisor 计费和本机网卡也会有正常偏差。超额计费若只算出站，请另外看出站数字。
-
-
-## 套餐将尽时自动断流
-
-**前置条件：** 该节点同时配置了月额度（`MONTHLY_CAP_BYTES` 非 0）和重置时刻。无限流量不会切。不需要再配端口或业务名单。
-
-- 用量到套餐的 **80%**：Telegram 告警。
-- 用量到 **90%**：本机 nftables 切断公网业务（留 10% 缓冲），直到重置时刻再自动恢复。`/add` 如果没写重置时刻，只记账，不断流。
-- 用量按一条时间线入账。重置可以不是 0 点。重置日当天、时刻之前的流量算上一周期。
-- 保留 SSH、本监控（agent↔hub、hub 的 Telegram）、DNS/NTP/DHCP、链路本地 `169.254.0.0/16`（云厂商元数据/监控组件）、私网 RFC1918、`tailscale0`，以及 `tailscaled` 自己的隧道外层流量。其它公网出入站默认丢掉。
-- 断流由独立的 root 助手 `traffic-cut.service` 执行，监控进程本身没有改防火墙的权限。另有每分钟一次的 `traffic-cut.timer`：监控进程停了，过了重置时刻也会把规则撤掉；断流期间 Telegram 地址变了会重套规则。
-- 这不是云账单对账：入站 DDoS 仍按厂商口径计；本机只保证不再把大包打回公网。
-
-重置可写到秒，例如 `/reset node 27T08:00:00` 或安装时 `--reset 27T08:00:00`。只写日期则当天 0 点；只写小时则分钟和秒为 0。时间按该机器的系统时区。
-
-## 角色
-
-**Hub**（第一台，也监控自己）
-
-- `traffic-hub`：库存、心跳、本机采样（约每 20 秒）
-- `traffic-bot`：Telegram 长轮询，只响应配置里的 `TELEGRAM_CHAT_ID`
-- `traffic-monitor.timer`：每日摘要（默认本机 16:00）
-
-**Agent**（更多机器）
-
-- `traffic-agent`：本机记账，出站连 hub，并执行测速 / 网卡采样任务
-- 不必对公网再开业务端口
-
-不要在两台机器上同时跑 bot。
-
-Hub 对 agent 只提供 **HTTPS**（TLS 1.2+，自签证书）。防火墙放行 **入站 TCP 8788**，不是 UDP，也不是 7 层。证书和私钥在 hub 的 `/var/lib/traffic-monitor/hub.{crt,key}`；部署 agent 时由脚本从 hub 拷走 `hub.crt` 做校验。每个 Agent 使用独立 Bearer 凭证；管理 API 只接受 ADMIN_TOKEN。
-
-Hub 的 `8788` **只在有 agent 要加入时**才需要对那些机器开放。只有一台机器时，bot 走本机 `https://127.0.0.1:8788`，不必对公网放行。若要放行，尽量限制来源 IP。
+每日汇总默认在 hub 本机时间 09:00 推送（`DAILY_REPORT_TIME`），内容为每个节点的在线状态、CPU/内存/磁盘、昨日与今日流量、本账期用量和上限。
 
 ## 安装
 
-目标机需要：root 或免密 sudo、systemd、`python3`。
+目标机需要 root、systemd、`python3`；hub 还需要 `openssl`。把仓库拷到机器上，在仓库目录执行。
 
-在你用来部署的电脑上：
-
-```bash
-cp deploy.local.example deploy.local
-# 编辑 SSH_TARGET 等；token 也可以只写在目标机的 /etc/traffic-monitor.env
-```
-
-第一台（hub）：
+**1. 汇总节点（hub）**
 
 ```bash
-./deploy-remote.sh --name my-node --cap 2T --reset 27
+sudo ./install.sh hub --name hk --tg-token 123456:ABC... --tg-chat 987654321 --cap 2T --reset 1
 ```
 
-再加机器（agent）。`HUB_URL` 写 agent **实际能访问到的** hub 地址，不要把该地址提交进仓库：
+安装时会发送一条 Telegram 测试消息，并打印 agent 的安装命令（其中包含共享 token 和 hub 证书指纹）。在 hub 上放行入站 **TCP 8788**，尽量只允许 agent 的来源 IP 访问。
+
+**2. 其他机器（agent）**：复制 hub 打印出的命令，改掉 `--name`、`--hub` 地址和流量参数：
 
 ```bash
-./deploy-remote.sh --role agent \
-  --hub https://HUB_HOST:8788 \
-  --name hk --cap 2T --reset 1 \
-  user@hk-host
+sudo ./install.sh agent --name sg --hub https://HUB_IP:8788 \
+  --token <hub 打印的 token> --fingerprint <hub 打印的指纹> \
+  --cap 500G --reset 27T08:00
 ```
 
-设置 `HUB_HOST` 后，部署脚本会在 Hub 上登记该节点，并通过私有 SSH 管道取得独立凭证和证书。已登记节点的额度与停用状态会保留。管理凭证不下发到 Agent。
+安装时会先上报一次，失败会给出提示。
 
-额度：`500G`、`1T`、`2T`、`unlimited`。网卡不是 `eth0` 时加 `--iface`。
+**升级 / 修改配置**：重新执行 `install.sh hub|agent`，只带要改的参数，其余参数沿用 `/etc/traffic-monitor.env` 里的值。
 
-## Telegram
+**下线某台机器**：先在那台机器上执行 `sudo ./install.sh uninstall`，再到 hub 上执行 `sudo ./install.sh forget sg`，否则 hub 会一直报它离线。
 
-先在客户端向 bot 发一条消息，再把 `TELEGRAM_CHAT_ID` 配上。之后以消息下面的按钮为主。
+参数说明：
 
-| 命令 / 按钮 | 作用 |
+| 参数 | 说明 |
 |---|---|
-| `/all` 或「机群总览」 | 全部汇总 |
-| `/nodes` | 覆盖列表 |
-| `/go 名字` 或点机器名 | 一台详情 |
-| `/traffic` `/today` `/cpu` `/mem` `/disk` `/uptime` | 可加名字或 `all` |
-| `/svc 名字 xray 443,2053` | 可选：在该机探测这些 TCP 端口；不配则详情里不显示 |
-| `/svc 名字 xray off` | 去掉该服务 |
-| 「网速」或 `/net 名字` | 读网卡当前吞吐约 3 秒，**不打流** |
-| 「测速」或 `/bw 名字 [秒]` | 对 Cloudflare 下载/上传，测公网带宽 |
-| 「延迟」或 `/rtt 名字` | 这台机器 ping 欧洲、美国、中国、东南亚的固定地址 |
-| `/add 名字 cap=2T reset=27` | 纳入覆盖；`reset=27T08:00:00` 可到秒 |
-| `/cap 名字 500G` | 改额度；有额度+重置则 90% 断流 |
-| `/reset 名字 27` | 改本机时区的重置时刻 |
-| `/off` `/on` | 停用 / 重新启用（仍留在名单里） |
-| `/kick 名字` | 踢出，需再 `/add` 才会回来 |
-| 「中文」/「English」或 `/lang zh` `/lang en` | 切换 bot 语言 |
+| `--name` | 节点名，`[a-z][a-z0-9-]{0,31}` |
+| `--cap` | 月流量上限，十进制单位（`2T` = 2×10¹² 字节）；`unlimited` 或不填表示不限量 |
+| `--reset` | 账期重置时刻，本机时区：`27` 表示每月 27 日 00:00:00，`27T08:00` 表示 27 日 08:00；短月份自动取月末那天 |
+| `--iface` | 统计哪块网卡，默认取默认路由所在的网卡 |
+| `--port` / `--daily` / `--lang` | 仅 hub 可用：监听端口 / 每日汇总时间 / 消息语言 `zh` 或 `en` |
 
-「网速」看的是网卡正在走的流量；「测速」才会主动打流。两者不是一回事。
-「延迟」是这台机器到欧洲、美国、中国、东南亚的 ping。地址是固定的，不会就近落到本地。
+## 月流量怎么统计
 
-## 可选服务探活
+- 每 20 秒读取 `/proc/net/dev` 中指定网卡的 rx/tx 累计字节数，把增量按时间区间写入 `/var/lib/traffic-monitor/traffic.sqlite3`。入站和出站都计入。
+- 服务停止但机器没有重启时，内核计数器仍在累加，下次采样会把这段补上；机器重启后从开机时刻重新计数。
+- 跨过账期重置时刻或零点的区间，按时间比例拆分到两边，总字节数守恒。
+- agent 在本机计算账期用量，hub 宕机期间照常记账。
 
-这是扩展项，**不配就不显示按钮**。Xray、Nginx 或别的进程都可以，只是「在那台机器上探测一组 TCP 端口是否在听」。
+这是预警用的账本，不能替代云厂商账单：关机或重启前最后一次采样之后的流量（最多约 20 秒）会丢失；hub 在虚机网卡上计量，厂商在宿主机或交换机上计量，口径本来就有差异；账期中途才安装时，安装之前的用量统计不到。
 
-用 Telegram 配（写进 hub 的 `inventory.json`，不进 git）：
+## 安全
 
-```
-/svc NODE xray 443,2053
-/svc NODE nginx 80,443 proc=nginx
-/svc NODE xray off
-/svc NODE off
-```
+- agent 与 hub 之间用 HTTPS 通信。hub 使用自签证书，agent 用 SHA-256 指纹固定校验，指纹不对就不会发出 token。
+- 所有 agent 共用一个 `AGENT_TOKEN`，只能用来上报。
+- 服务以 `trafficmon` 用户运行，不需要 root 权限。
 
-- `NODE` 是节点名；服务名自定，小写字母、数字、短横线。
-- 端口任意，逗号分隔。探测的是目标机本机 `127.0.0.1` / `::1`，所以只绑在 localhost 的 inbound 也能盯。
-- `proc=` 可选，用来读进程 RSS；省略则默认等于服务名。
-- 每台最多 4 个服务。再加一种服务再发一条 `/svc` 即可。
+## 文件位置
 
-`/xray` 仍可用：若该机配过名为 `xray` 的服务就看它，否则看第一个已配服务。
-
-
-## `/etc/traffic-monitor.env`
-
-对照 `traffic-monitor.env.example`。不要把填好的文件提交到 git。
-
-| 变量 | 含义 |
+| 路径 | 用途 |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Hub 必填 |
-| `ADMIN_TOKEN` | Hub/Bot 管理凭证，Agent 不持有 |
-| `AGENT_TOKEN` | 每个 Agent 独立的上报凭证，只能代表自己的节点 |
-| `AGENT_AUTH_FILE` | Hub 节点凭证表，默认 `/etc/traffic-monitor-agents.json`（root:trafficmon，0640） |
-| `ROLE` | `hub` 或 `agent` |
-| `NODE_NAME` | 节点名，`[a-z][a-z0-9-]{0,31}` |
-| `TRAFFIC_IFACE` | 记账网卡 |
-| `HOST_LABEL` | Telegram 里显示的名字；空则用 `NODE_NAME`，再退回主机名 |
-| `BILLING_RESET_DAY` | 本机时区的月重置日（1–31） |
-| `BILLING_RESET_TIME` | 当天本机时:分:秒，缺省为 0 |
-| `MONTHLY_CAP_BYTES` | 额度字节数；`0` 表示不限额，也不会断流 |
-| `DAILY_REPORT_HOUR_UTC` | 日报小时 |
-| `HUB_BIND` / `HUB_PORT` | Hub 监听 |
-| `HUB_URL` | Bot 连本机 hub，一般 `https://127.0.0.1:8788` |
-| `FLEET_HUB_URL` | Agent 连 hub（`https://...`） |
-| `FLEET_PUBLIC_URL` | 可选，给提示用的对外地址；不需要就留空 |
-| `HUB_CA` | 校验 hub 的证书，默认 `/var/lib/traffic-monitor/hub.crt` |
-| `UI_LANG` | bot 默认语言，`zh` 或 `en`。Telegram 按钮可覆盖，写入 `ui.json` |
+| `/etc/traffic-monitor.env`（0600） | 配置与 token，不要提交到 git，参考 `traffic-monitor.env.example` |
+| `/opt/traffic-monitor` | 程序 |
+| `/var/lib/traffic-monitor` | 流量账本；hub 另有 `nodes.json`（已知节点）、`alerts.json`（告警状态）、`hub.crt/key` |
 
-## systemd 内存上限
-
-| unit | MemoryMax | 说明 |
-|---|---|---|
-| `traffic-hub` | 96M | 仅 hub |
-| `traffic-bot` | 56M | 仅 hub |
-| `traffic-agent` | 96M | 仅 agent |
-| `traffic-monitor.timer` | 48M oneshot | 日报 |
-| `traffic-cut` | 32M oneshot | 套餐断流（root，nft） |
-
-状态目录：`/var/lib/traffic-monitor`。代码安装到 `/opt/traffic-monitor`。
-
-## 升级与回滚
-
-代码安装到 `/opt/traffic-monitor-releases/<版本>`，`/opt/traffic-monitor` 原子切换到新版本。部署前保存代码、配置和 unit 备份到 `/var/backups/traffic-monitor`；服务或记账就绪检查失败时，脚本自动恢复备份。旧 `traffic.json` 首次启动时事务性迁移到 SQLite，原文件保留；迁移失败会阻止采样，不会清空用量。
-
-root 断流助手只写 `/var/lib/traffic-monitor-cut/applied.json`，应用只写自己的请求文件。助手每分钟核对实际 nftables 表和规则摘要；重启、规则丢失或规则改变都会重新应用。规则更新采用单个原子 nft 事务，失败时保留原规则。
-
-采集、通知和测量分别运行；`/healthz` 在采集线程停止或超过 90 秒未成功采集时返回 503。Agent 断网或运行测量任务不阻塞本地采集。任务具有持久化租约、接收确认和结果去重；已经开始的测速在进程中断后报告失败，不重复打流。
-
-旧分钟账本的历史精度仍为分钟，新采样区间跨边界使用均匀分摊估计；到秒的重置不会再把整个分钟排除，但这仍不是云账单对账。
-
-## 验证
+## 开发
 
 ```bash
 python3 -m unittest discover -s tests -v
-bash -n install-host.sh deploy-remote.sh
-python3 tests/benchmark_ledger.py .
+bash -n install.sh
+python3 tests/benchmark_ledger.py .   # 用合成数据测试账本的内存和耗时
 ```
-
-Linux 上的 nftables 实测必须在独立网络命名空间运行：`sudo unshare --net python3 tests/native_nft.py .`。脚本会拒绝在主机网络命名空间中运行。GitHub Actions 检查 Python 3.9 和 3.12。

@@ -1,5 +1,5 @@
 [Unit]
-Description=Traffic fleet hub (inventory, heartbeats, jobs)
+Description=traffic-monitor hub (collect, alert, daily summary)
 After=network-online.target
 Wants=network-online.target
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Traffic fleet agent (heartbeat + bandwidth jobs)
+Description=traffic-monitor agent (report to hub)
 After=network-online.target
 Wants=network-online.target
 
@@ -16,7 +16,7 @@ RestartSec=5
 Nice=0
 CPUQuota=80%
 CPUWeight=80
-TasksMax=12
+TasksMax=8
 MemoryAccounting=yes
 MemoryHigh=56M
 MemoryMax=96M

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Hub TLS: self-signed cert via openssl CLI. Stdlib + openssl, no pip."""
+"""Hub TLS: self-signed cert via the openssl CLI; agents pin its SHA-256 fingerprint."""
 from __future__ import annotations
 
-import ipaddress
+import hashlib
+import hmac
+import http.client
+import json
 import os
-import socket
+import shutil
 import ssl
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 import util
@@ -20,168 +23,85 @@ def cert_paths() -> tuple[Path, Path]:
     return base / "hub.crt", base / "hub.key"
 
 
-def ca_path() -> Path:
-    raw = util.env_opt("HUB_CA")
-    if raw:
-        return Path(raw)
-    crt, _ = cert_paths()
-    return crt
-
-
-def parse_host(raw: str) -> str:
-    text = (raw or "").strip()
-    if not text:
-        return ""
-    if "://" in text:
-        return (urlparse(text).hostname or "").strip()
-    try:
-        ipaddress.ip_address(text)
-        return text
-    except ValueError:
-        pass
-    if text.count(":") == 1:
-        host, port = text.rsplit(":", 1)
-        if port.isdigit():
-            return host.strip()
-    return text.split("/")[0].strip()
-
-
-def classify_names(values: Iterable[str]) -> tuple[list[str], list[str]]:
-    dns: set[str] = set()
-    ips: set[str] = set()
-    for raw in values:
-        host = parse_host(raw)
-        if not host:
-            continue
-        try:
-            ipaddress.ip_address(host)
-            ips.add(host)
-        except ValueError:
-            dns.add(host.lower())
-    dns.add("localhost")
-    ips.add("127.0.0.1")
-    try:
-        hostname = socket.gethostname().strip().lower()
-        if hostname:
-            try:
-                ipaddress.ip_address(hostname)
-                ips.add(hostname)
-            except ValueError:
-                dns.add(hostname)
-    except OSError:
-        pass
-    return sorted(dns), sorted(ips)
-
-
-def as_https(url: str, default_host: str = "127.0.0.1", default_port: int = 8788) -> str:
-    text = (url or "").strip()
-    if not text:
-        return f"https://{default_host}:{default_port}"
-    if text.startswith("http://"):
-        text = "https://" + text[7:]
-    elif not text.startswith("https://"):
-        text = "https://" + text
-    parsed = urlparse(text)
-    host = parsed.hostname or default_host
-    port = parsed.port or default_port
-    return f"https://{host}:{port}"
-
-
-def ensure_hub_cert(dns_names: list[str], ip_names: list[str]) -> tuple[Path, Path]:
+def ensure_hub_cert() -> tuple[Path, Path]:
     crt, key = cert_paths()
-    crt.parent.mkdir(parents=True, exist_ok=True)
-    if crt.is_symlink() or key.is_symlink():
-        raise RuntimeError("TLS files must not be symlinks")
     if crt.is_file() and key.is_file():
         return crt, key
-    alt_lines = [f"DNS.{i} = {name}" for i, name in enumerate(dns_names, start=1)]
-    alt_lines += [f"IP.{i} = {name}" for i, name in enumerate(ip_names, start=1)]
-    config = "\n".join(
-        [
-            "[req]",
-            "default_bits = 2048",
-            "prompt = no",
-            "distinguished_name = dn",
-            "x509_extensions = ext",
-            "",
-            "[dn]",
-            "CN = traffic-monitor-hub",
-            "",
-            "[ext]",
-            "basicConstraints = CA:FALSE",
-            "keyUsage = digitalSignature, keyEncipherment",
-            "extendedKeyUsage = serverAuth",
-            "subjectAltName = @alt",
-            "",
-            "[alt]",
-            *alt_lines,
-            "",
-        ]
-    )
-    if not shutil_which("openssl"):
+    if not shutil.which("openssl"):
         raise SystemExit("openssl is required to create the hub TLS certificate")
+    crt.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        cfg = Path(tmp) / "hub.cnf"
-        temporary_key, temporary_crt = Path(tmp) / "hub.key", Path(tmp) / "hub.crt"
-        cfg.write_text(config, encoding="utf-8")
-        try:
-            subprocess.run(
-                [
-                    "openssl",
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-nodes",
-                    "-days",
-                    "825",
-                    "-keyout",
-                    str(temporary_key),
-                    "-out",
-                    str(temporary_crt),
-                    "-config",
-                    str(cfg),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            raise SystemExit(exc.stderr or exc.stdout or str(exc)) from exc
-        temporary_key.chmod(0o600)
-        temporary_crt.chmod(0o644)
-        os.replace(temporary_key, key)
-        os.replace(temporary_crt, crt)
+        tmp_key, tmp_crt = Path(tmp) / "hub.key", Path(tmp) / "hub.crt"
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
+             "-subj", "/CN=traffic-monitor-hub", "-keyout", str(tmp_key), "-out", str(tmp_crt)],
+            check=True, capture_output=True,
+        )
+        tmp_key.chmod(0o600)
+        tmp_crt.chmod(0o644)
+        shutil.move(str(tmp_key), key)
+        shutil.move(str(tmp_crt), crt)
     return crt, key
 
 
-def shutil_which(name: str) -> Optional[str]:
-    from shutil import which
-
-    return which(name)
+def normalize_fingerprint(text: str) -> str:
+    return (text or "").replace(":", "").strip().lower()
 
 
-_client_ctx: Optional[ssl.SSLContext] = None
-_client_ca = ""
-
-
-def client_context() -> ssl.SSLContext:
-    global _client_ctx, _client_ca
-    ca = ca_path()
-    if not ca.is_file():
-        raise RuntimeError(f"missing hub TLS CA file: {ca}")
-    key = str(ca)
-    if _client_ctx is None or _client_ca != key:
-        _client_ctx = ssl.create_default_context(cafile=key)
-        _client_ca = key
-    return _client_ctx
+def fingerprint(crt: Path) -> str:
+    der = ssl.PEM_cert_to_DER_cert(crt.read_text(encoding="ascii"))
+    return hashlib.sha256(der).hexdigest()
 
 
 def server_context() -> ssl.SSLContext:
     crt, key = cert_paths()
-    if not crt.is_file() or not key.is_file():
-        raise SystemExit(f"hub TLS cert missing: {crt} {key}")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(str(crt), str(key))
     return ctx
+
+
+class PinError(RuntimeError):
+    """The hub presented a certificate other than the pinned one."""
+
+
+class HubError(RuntimeError):
+    def __init__(self, code: int, detail: str) -> None:
+        super().__init__(f"hub HTTP {code}: {detail}")
+        self.code = code
+
+
+def post_json(url: str, pin: str, token: str, payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+    """POST to the hub. The certificate is checked against the pin before the token is sent."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError(f"hub URL must be https://HOST:PORT, got {url!r}")
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 8788, timeout=timeout, context=ctx)
+    try:
+        conn.connect()
+        got = hashlib.sha256(conn.sock.getpeercert(binary_form=True) or b"").hexdigest()
+        if not hmac.compare_digest(got, normalize_fingerprint(pin)):
+            raise PinError(f"hub certificate fingerprint mismatch: {got}")
+        body = json.dumps(payload).encode()
+        conn.request("POST", parsed.path or "/", body=body, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Connection": "close",
+        })
+        resp = conn.getresponse()
+        raw = resp.read(65536).decode("utf-8", errors="replace")
+        if resp.status != 200:
+            raise HubError(resp.status, raw[:200])
+        return json.loads(raw) if raw else {}
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    # install.sh: create the cert if needed and print its fingerprint.
+    os.umask(0o077)
+    print(fingerprint(ensure_hub_cert()[0]))
