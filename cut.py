@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+import os
+from pathlib import Path
 
 import report
 import util
@@ -42,7 +44,7 @@ def desired_path():
 
 
 def applied_path():
-    return util.state_dir() / APPLIED_NAME
+    return Path(os.environ.get("TRAFFIC_CUT_STATE_DIR") or "/var/lib/traffic-monitor-cut") / "applied.json"
 
 
 def read_desired() -> dict[str, Any]:

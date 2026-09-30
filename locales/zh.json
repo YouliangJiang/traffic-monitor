@@ -188,5 +188,8 @@
   "usage.off": "用法：<code>/off hk</code>",
   "usage.on": "用法：<code>/on hk</code>",
   "usage.reset": "用法：<code>/reset hk 27</code> 或 <code>/reset hk 27T08:00:00</code>（本机时区）",
-  "usage.svc": "用法：<code>/svc hk xray 443,2053</code>\n<code>/svc hk nginx 80,443 proc=nginx</code>\n<code>/svc hk xray off</code>\n<code>/svc hk off</code>"
+  "usage.svc": "用法：<code>/svc hk xray 443,2053</code>\n<code>/svc hk nginx 80,443 proc=nginx</code>\n<code>/svc hk xray off</code>\n<code>/svc hk off</code>",
+  "job.busy": "测量队列已满，请稍后再试。",
+  "node.cut_failed": "保护规则未生效，正在重试。",
+  "node.cut_pending": "保护规则正在应用。"
 }

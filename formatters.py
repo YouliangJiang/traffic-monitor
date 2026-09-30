@@ -172,8 +172,12 @@ def node_detail(row: dict[str, Any]) -> str:
         cut_info = snap.get("cut") or {}
         if not row.get("reset_set", True):
             cap_note = i18n.t("node.cut_needs_reset")
-        elif cut_info.get("applied") == "cut" or cut_info.get("want") == "cut":
+        elif cut_info.get("want") == "cut" and cut_info.get("ok") is False:
+            cap_note = i18n.t("node.cut_failed")
+        elif cut_info.get("applied") == "cut" and cut_info.get("ok") is True:
             cap_note = i18n.t("node.cut_active")
+        elif cut_info.get("want") == "cut":
+            cap_note = i18n.t("node.cut_pending")
         elif (pct or 0) < 100:
             cap_note = i18n.t("node.in_plan")
         else:

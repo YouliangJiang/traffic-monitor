@@ -21,7 +21,7 @@ Tap **中文** / **English** on a message to switch UI language. The choice is s
 ## How traffic is counted
 
 - Read rx/tx bytes for a chosen NIC (default `eth0`) from `/proc/net/dev`. Inbound and outbound both count.
-- Deltas are stored on one timeline in `/var/lib/traffic-monitor/traffic.json`. A day-only reset means `00:00:00`. If the monitor process dies briefly but the host does not reboot, the kernel counters remain and the next sample fills the gap.
+- Deltas are stored on one timeline in `/var/lib/traffic-monitor/traffic.sqlite3`. A day-only reset means `00:00:00`. If the monitor process dies briefly but the host does not reboot, the kernel counters remain and the next sample fills the gap.
 - Billing periods use the host timezone (`timedatectl`). The reset instant is `BILLING_RESET_DAY` plus optional `BILLING_RESET_TIME` (`HH`, `HH:MM`, or `HH:MM:SS`; omitted minutes and seconds are 0, a day alone is `00:00:00`). Caps are **decimal** (`2T` = 2×10¹² bytes), matching most cloud "plan includes in+out" wording.
 - First install writes `bootstrap.json` so usage since the current boot, before the monitor was installed, can be included.
 
@@ -86,7 +86,7 @@ More hosts (agent). `HUB_URL` must be an address the **agent can actually reach*
   user@hk-host
 ```
 
-`FLEET_TOKEN` can live in `deploy.local`, or set `HUB_HOST` so the script reads it from the existing hub's `/etc/traffic-monitor.env`.
+Set `HUB_HOST` to enroll each agent and privately obtain its own token and the hub certificate over SSH. The administrative token is not sent to agents.
 
 Caps: `500G`, `1T`, `2T`, `unlimited`. Add `--iface` when the NIC is not `eth0`.
 
@@ -145,7 +145,9 @@ See `traffic-monitor.env.example`. Do not commit a filled-in copy.
 | Variable | Meaning |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Required on the hub |
-| `FLEET_TOKEN` | Shared bearer for hub and agents |
+| `ADMIN_TOKEN` | Hub/Bot administrative credential |
+| `AGENT_TOKEN` | Unique credential bound to one agent |
+| `AGENT_AUTH_FILE` | Root-owned hub enrollment map |
 | `ROLE` | `hub` or `agent` |
 | `NODE_NAME` | `[a-z][a-z0-9-]{0,31}` |
 | `TRAFFIC_IFACE` | Accounting NIC |
@@ -172,3 +174,15 @@ See `traffic-monitor.env.example`. Do not commit a filled-in copy.
 | `traffic-cut` | 32M oneshot | Cap cutoff (root, nft) |
 
 State directory: `/var/lib/traffic-monitor`. Code installs to `/opt/traffic-monitor`.
+
+## Reliability and upgrades
+
+Traffic is stored incrementally in SQLite as timestamped intervals. Intervals crossing billing boundaries are proportionally allocated using integer prefix differences, conserving total bytes. The existing JSON ledger is imported once in a transaction and kept as a backup. Invalid accounting is reported as a failure and never resets usage or removes protection. Historical minute data retains its original precision.
+
+Use ADMIN_TOKEN for the hub/bot control plane and a distinct AGENT_TOKEN for each node. The root-owned AGENT_AUTH_FILE defaults to /etc/traffic-monitor-agents.json, with mode 0640 and group trafficmon. Set HUB_HOST during agent deployment to enroll that node and privately transfer its credential and certificate over SSH. Agent keys cannot read fleet data, administer nodes, or impersonate another node.
+
+The root cutoff helper stores its results in /var/lib/traffic-monitor-cut/applied.json, outside the application's writable directory. It verifies actual kernel rules every minute and applies replacements as atomic nft transactions. Collection, alert delivery, and measurement execution are separate workers. Health checks fail if collection stops or becomes stale. Persisted job leases and acknowledgments permit redelivery; agents cache results and never repeat an already-started bandwidth measurement after interruption.
+
+Deployments install versioned releases under /opt/traffic-monitor-releases and atomically update /opt/traffic-monitor. Code, configuration, and units are backed up under /var/backups/traffic-monitor. Failed readiness checks automatically roll back.
+
+Run python3 -m unittest discover -s tests -v and bash -n install-host.sh deploy-remote.sh. Run tests/native_nft.py only using sudo unshare --net; it refuses to operate in the host network namespace. tests/benchmark_ledger.py uses synthetic SQLite data. CI covers Python 3.9 and 3.12.

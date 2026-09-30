@@ -1,165 +1,182 @@
 #!/usr/bin/env python3
-"""One NIC timeline. Each bucket is one UTC minute."""
+"""Transactional NIC accounting; bounded-memory queries over timestamped intervals."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+import json
 from pathlib import Path
+import sqlite3
 from typing import Any, Optional
 
 import util
 
-MINUTE_FMT = "%Y-%m-%dT%H:%M"
+UTC = timezone.utc
 
 
 def _iface_bytes(iface: str) -> tuple[int, int]:
-    with open("/proc/net/dev", encoding="utf-8") as fh:
-        for line in fh:
-            label, _, rest = line.partition(":")
+    with open('/proc/net/dev', encoding='utf-8') as stream:
+        for line in stream:
+            label, _, rest = line.partition(':')
             if label.strip() == iface:
-                parts = rest.split()
-                return int(parts[0]), int(parts[8])
-    raise RuntimeError(f"interface {iface} not found")
+                fields = rest.split()
+                return int(fields[0]), int(fields[8])
+    raise RuntimeError(f'interface {iface} not found')
 
 
 def _boot_id() -> str:
+    return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+
+
+def _boot_time() -> Optional[datetime]:
     try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+        for line in Path('/proc/stat').read_text().splitlines():
+            if line.startswith('btime '):
+                return datetime.fromtimestamp(int(line.split()[1]), UTC)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _micros(value: datetime) -> int:
+    return int(_as_utc(value).timestamp() * 1_000_000)
 
 
 def _path() -> Path:
-    return util.state_dir() / "traffic.json"
+    return util.state_dir() / 'traffic.sqlite3'
 
 
-def _load() -> dict[str, Any]:
-    return util.load_json(_path())
-
-
-def _save(data: dict[str, Any]) -> None:
-    util.save_json(_path(), data)
-
-
-def _minute_key(when: datetime) -> str:
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    else:
-        when = when.astimezone(timezone.utc)
-    return when.strftime(MINUTE_FMT)
-
-
-def _parse_minute(key: str) -> Optional[datetime]:
-    try:
-        return datetime.strptime(str(key), MINUTE_FMT).replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
-
-def _fold_legacy_days(data: dict[str, Any]) -> None:
-    """Move old per-day totals into the minute timeline once, then drop them.
-
-    A day total has no clock time. It is placed at 00:00 UTC, which is the
-    same default used when a reset is configured as a day only.
-    """
-    days = data.get("days")
-    if not isinstance(days, dict) or not days:
-        data.pop("days", None)
+def _migrate(connection: sqlite3.Connection) -> None:
+    """Import the existing ledger once, in the same transaction as its baseline."""
+    if connection.execute('SELECT 1 FROM metadata WHERE id=1').fetchone():
         return
-    minutes: dict[str, Any] = data.setdefault("minutes", {})
-    covered: dict[str, tuple[int, int]] = {}
+    legacy = util.state_dir() / 'traffic.json'
+    if not legacy.exists():
+        return
+    data = util.load_json(legacy, strict=True)
+    required = {'iface', 'boot_id', 'last_rx', 'last_tx', 'last_ts'}
+    if not required.issubset(data):
+        raise util.StateError('legacy ledger has no valid baseline')
+    minutes = dict(data.get('minutes') or {})
+    # Older releases recorded whole days. Preserve amounts not already in minutes.
+    covered: dict[str, list[int]] = {}
     for key, entry in minutes.items():
-        text = str(key)
-        if len(text) < 10:
-            continue
-        day = text[:10]
-        drx = int((entry or {}).get("rx") or 0)
-        dtx = int((entry or {}).get("tx") or 0)
-        prev = covered.get(day, (0, 0))
-        covered[day] = (prev[0] + drx, prev[1] + dtx)
-    for day_key, entry in days.items():
-        day = str(day_key)
-        day_rx = int((entry or {}).get("rx") or 0)
-        day_tx = int((entry or {}).get("tx") or 0)
-        got = covered.get(day)
-        extra_rx = day_rx if got is None else day_rx - got[0]
-        extra_tx = day_tx if got is None else day_tx - got[1]
-        if extra_rx <= 0 and extra_tx <= 0:
-            continue
-        slot_key = f"{day}T00:00"
-        slot = minutes.setdefault(slot_key, {"rx": 0, "tx": 0})
-        slot["rx"] = int(slot.get("rx") or 0) + max(0, extra_rx)
-        slot["tx"] = int(slot.get("tx") or 0) + max(0, extra_tx)
-    data.pop("days", None)
+        total = covered.setdefault(key[:10], [0, 0])
+        total[0] += int(entry.get('rx') or 0)
+        total[1] += int(entry.get('tx') or 0)
+    for day, entry in (data.get('days') or {}).items():
+        previous = covered.get(day, [0, 0])
+        extra = [max(0, int(entry.get(k) or 0) - previous[i]) for i, k in enumerate(('rx', 'tx'))]
+        if any(extra):
+            slot = minutes.setdefault(day + 'T00:00', {'rx': 0, 'tx': 0})
+            slot['rx'] += extra[0]
+            slot['tx'] += extra[1]
+    last = _micros(datetime.fromisoformat(data['last_ts']))
+    for key, entry in minutes.items():
+        start = _micros(datetime.strptime(key, '%Y-%m-%dT%H:%M').replace(tzinfo=UTC))
+        end = min(start + 60_000_000, last) if start <= last else start + 60_000_000
+        end = max(start + 1, end)
+        connection.execute('INSERT INTO samples VALUES(?,?,?,?)', (end, start, int(entry.get('rx') or 0), int(entry.get('tx') or 0)))
+    baseline = {key: data[key] for key in required}
+    connection.execute('INSERT INTO metadata VALUES(1,?)', (json.dumps(baseline),))
+
+
+@contextmanager
+def _database():
+    path = _path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise util.StateError('ledger database must not be a symlink')
+    connection = sqlite3.connect(str(path), timeout=10, isolation_level=None)
+    try:
+        connection.execute('PRAGMA journal_mode=WAL')
+        connection.execute('PRAGMA synchronous=FULL')
+        connection.execute('PRAGMA cache_size=-2048')
+        connection.execute('CREATE TABLE IF NOT EXISTS metadata(id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
+        connection.execute('CREATE TABLE IF NOT EXISTS samples(end_us INTEGER PRIMARY KEY, start_us INTEGER NOT NULL, rx INTEGER NOT NULL CHECK(rx>=0), tx INTEGER NOT NULL CHECK(tx>=0), CHECK(end_us>start_us))')
+        connection.execute('BEGIN IMMEDIATE')
+        _migrate(connection)
+        connection.execute('COMMIT')
+        yield connection
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        connection.close()
 
 
 def record_sample(iface: str, now: Optional[datetime] = None) -> None:
-    now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    else:
-        now = now.astimezone(timezone.utc)
+    now = _as_utc(now or datetime.now(UTC))
     rx, tx = _iface_bytes(iface)
     boot = _boot_id()
-    data = _load()
-    if not data:
-        data = {
-            "iface": iface,
-            "boot_id": boot,
-            "last_rx": rx,
-            "last_tx": tx,
-            "last_ts": now.isoformat(),
-            "minutes": {},
-        }
-        _save(data)
-        return
-    _fold_legacy_days(data)
-    minutes: dict[str, Any] = data.setdefault("minutes", {})
-    same_boot = boot and boot == data.get("boot_id")
-    last_rx = int(data.get("last_rx") or 0)
-    last_tx = int(data.get("last_tx") or 0)
-    if same_boot and rx >= last_rx and tx >= last_tx:
-        key = _minute_key(now)
-        slot = minutes.setdefault(key, {"rx": 0, "tx": 0})
-        slot["rx"] = int(slot.get("rx") or 0) + (rx - last_rx)
-        slot["tx"] = int(slot.get("tx") or 0) + (tx - last_tx)
-    cutoff = (now.date() - timedelta(days=400)).isoformat()
-    data["minutes"] = {key: value for key, value in minutes.items() if str(key) >= cutoff}
-    data["iface"] = iface
-    data["boot_id"] = boot
-    data["last_rx"] = rx
-    data["last_tx"] = tx
-    data["last_ts"] = now.isoformat()
-    _save(data)
+    if not boot:
+        raise RuntimeError('missing boot identity')
+    with _database() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        saved = connection.execute('SELECT value FROM metadata WHERE id=1').fetchone()
+        if saved:
+            previous = json.loads(saved[0])
+            start = _as_utc(datetime.fromisoformat(previous['last_ts']))
+            if now < start:
+                raise RuntimeError('clock moved backwards; keeping the previous accounting baseline')
+            same_iface = previous['iface'] == iface
+            if same_iface and boot == previous['boot_id'] and rx >= previous['last_rx'] and tx >= previous['last_tx']:
+                drx, dtx = rx - previous['last_rx'], tx - previous['last_tx']
+            elif same_iface and boot != previous['boot_id']:
+                start = _boot_time() or start
+                drx, dtx = rx, tx
+            else:
+                drx = dtx = 0
+            if _micros(now) > _micros(start) and (drx or dtx):
+                connection.execute('INSERT INTO samples VALUES(?,?,?,?)', (_micros(now), _micros(start), drx, dtx))
+        baseline = {'iface': iface, 'boot_id': boot, 'last_rx': rx, 'last_tx': tx, 'last_ts': now.isoformat()}
+        connection.execute('INSERT OR REPLACE INTO metadata VALUES(1,?)', (json.dumps(baseline),))
+        cutoff = _micros(now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=400))
+        connection.execute('DELETE FROM samples WHERE end_us<?', (cutoff,))
+        connection.execute('COMMIT')
 
 
-def _as_utc(when: datetime) -> datetime:
-    if when.tzinfo is None:
-        return when.replace(tzinfo=timezone.utc)
-    return when.astimezone(timezone.utc)
-
-
-def sum_between(start: datetime, end: datetime) -> tuple[int, int]:
-    """Bytes whose minute starts in [start, end)."""
-    start = _as_utc(start)
-    end = _as_utc(end)
-    rx = tx = 0
-    for key, entry in (_load().get("minutes") or {}).items():
-        ts = _parse_minute(str(key))
-        if ts is None or not (start <= ts < end):
-            continue
-        rx += int((entry or {}).get("rx") or 0)
-        tx += int((entry or {}).get("tx") or 0)
+def _sum(connection: sqlite3.Connection, start: int, end: int) -> tuple[int, int]:
+    if end <= start:
+        return 0, 0
+    row = connection.execute('SELECT COALESCE(SUM(rx),0), COALESCE(SUM(tx),0) FROM samples WHERE end_us>? AND end_us<=? AND start_us>=?', (start, end, start)).fetchone()
+    rx, tx = int(row[0]), int(row[1])
+    # Only intervals crossing an edge need proportional allocation. Integer prefix
+    # differences conserve every byte when adjacent periods are queried separately.
+    for finish, begin, drx, dtx in connection.execute('SELECT end_us,start_us,rx,tx FROM samples WHERE end_us>? AND start_us<? AND (start_us<? OR end_us>?)', (start, end, start, end)):
+        duration = finish - begin
+        left, right = max(start, begin) - begin, min(end, finish) - begin
+        rx += drx * right // duration - drx * left // duration
+        tx += dtx * right // duration - dtx * left // duration
     return rx, tx
 
 
-def day_rows() -> list[tuple[date, int, int]]:
-    """Per local-day totals. Minute keys stay absolute UTC instants."""
-    totals: dict[date, list[int]] = {}
-    for key, entry in (_load().get("minutes") or {}).items():
-        ts = _parse_minute(str(key))
-        if ts is None:
-            continue
-        bucket = totals.setdefault(ts.astimezone(util.local_tz()).date(), [0, 0])
-        bucket[0] += int((entry or {}).get("rx") or 0)
-        bucket[1] += int((entry or {}).get("tx") or 0)
-    return [(day, rx, tx) for day, (rx, tx) in sorted(totals.items())]
+def sum_between(start: datetime, end: datetime) -> tuple[int, int]:
+    with _database() as connection:
+        return _sum(connection, _micros(start), _micros(end))
+
+
+def day_rows(last_n: Optional[int] = None) -> list[tuple[date, int, int]]:
+    with _database() as connection:
+        if last_n:
+            final_row = connection.execute('SELECT end_us FROM samples ORDER BY end_us DESC LIMIT 1').fetchone()
+            bounds = (final_row[0] - last_n * 86400 * 1_000_000, final_row[0]) if final_row else (None, None)
+        else:
+            bounds = connection.execute('SELECT MIN(start_us),MAX(end_us) FROM samples').fetchone()
+        if bounds[0] is None:
+            return []
+        tz = util.local_tz()
+        first = datetime.fromtimestamp(bounds[0] / 1_000_000, UTC).astimezone(tz).date()
+        final = datetime.fromtimestamp(bounds[1] / 1_000_000, UTC).astimezone(tz).date()
+        if last_n:
+            first = max(first, final - timedelta(days=last_n - 1))
+        rows = []
+        while first <= final:
+            begin = datetime.combine(first, datetime.min.time(), tzinfo=tz)
+            rx, tx = _sum(connection, _micros(begin), _micros(begin + timedelta(days=1)))
+            rows.append((first, rx, tx))
+            first += timedelta(days=1)
+        return rows

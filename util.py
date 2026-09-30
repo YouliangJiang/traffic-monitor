@@ -6,6 +6,8 @@ import json
 import os
 import re
 import ssl
+import stat
+import tempfile
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -42,26 +44,56 @@ def env_int(name: str, default: int) -> int:
 
 
 def state_dir() -> Path:
-    raw = os.environ.get("STATE_DIRECTORY") or os.environ.get("TRAFFIC_MONITOR_STATE_DIR")
+    raw = os.environ.get("TRAFFIC_MONITOR_STATE_DIR") or os.environ.get("STATE_DIRECTORY")
     if raw:
         return Path(raw.split(":")[0])
     return Path("/var/lib/traffic-monitor")
 
 
-def load_json(path: Path) -> dict[str, Any]:
+class StateError(RuntimeError):
+    """A required state file is missing, unreadable, or invalid."""
+
+
+def load_json(path: Path, *, strict: bool = False) -> dict[str, Any]:
     if not path.is_file():
+        if strict:
+            raise StateError(f"missing state file: {path.name}")
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise StateError(f"not a regular state file: {path.name}")
+            data = json.load(stream)
+        if not isinstance(data, dict):
+            raise StateError(f"invalid state object: {path.name}")
+        return data
+    except (OSError, ValueError, StateError) as exc:
+        if strict:
+            raise StateError(f"cannot read state file: {path.name}") from exc
         return {}
 
 
-def save_json(path: Path, data: Any) -> None:
+def save_json(path: Path, data: Any, *, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    fd, name = tempfile.mkstemp(prefix="." + path.name + "-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), mode)
+            json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+        if hasattr(os, "O_DIRECTORY"):
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if os.path.lexists(name):
+            os.unlink(name)
 
 
 def valid_node_name(name: str) -> bool:

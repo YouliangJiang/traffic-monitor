@@ -54,6 +54,10 @@ class Snapshot:
     projected: int
 
 
+class AccountingError(RuntimeError):
+    """Sampling failed; existing accounting and firewall state must be retained."""
+
+
 def utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -315,12 +319,9 @@ def collect_snapshot(
         local_now = local_now.astimezone(util.local_tz())
         today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         today_rx, today_tx = counters.sum_between(today_start, today_start + timedelta(days=1))
-        days = [DayBytes(day=day, rx=drx, tx=dtx) for day, drx, dtx in counters.day_rows()]
-    except Exception:
-        days = []
-        ledger_ok = False
-        rx = tx = 0
-        today_rx = today_tx = 0
+        days = [DayBytes(day=day, rx=drx, tx=dtx) for day, drx, dtx in counters.day_rows(last_n=4)]
+    except Exception as exc:
+        raise AccountingError(f"traffic accounting unavailable: {type(exc).__name__}") from exc
     start_d = period_start.date()
     end_d = (period_end - timedelta(microseconds=1)).date()
     extra_rx, extra_tx, applied = bootstrap_extra(bootstrap, period_start, period_end)
@@ -369,8 +370,7 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
             return
         except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
-    raise SystemExit(f"telegram send failed: {last_error}")
-
+    raise RuntimeError(f"telegram send failed: {last_error}")
 
 
 

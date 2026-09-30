@@ -188,5 +188,8 @@
   "usage.off": "Usage: <code>/off hk</code>",
   "usage.on": "Usage: <code>/on hk</code>",
   "usage.reset": "Usage: <code>/reset hk 27</code> or <code>/reset hk 27T08:00:00</code> (host local time)",
-  "usage.svc": "Usage: <code>/svc hk xray 443,2053</code>\n<code>/svc hk nginx 80,443 proc=nginx</code>\n<code>/svc hk xray off</code>\n<code>/svc hk off</code>"
+  "usage.svc": "Usage: <code>/svc hk xray 443,2053</code>\n<code>/svc hk nginx 80,443 proc=nginx</code>\n<code>/svc hk xray off</code>\n<code>/svc hk off</code>",
+  "job.busy": "The measurement queue is full. Please try again shortly.",
+  "node.cut_failed": "Protection has not taken effect; retrying.",
+  "node.cut_pending": "Protection is being applied."
 }

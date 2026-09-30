@@ -113,7 +113,7 @@ def hub_base() -> str:
 
 
 def fleet_token() -> str:
-    return util.env("FLEET_TOKEN")
+    return util.env("ADMIN_TOKEN")
 
 
 def public_hub() -> str:
@@ -980,7 +980,7 @@ def _dispatch_callback(data: str) -> Reply:
 
 
 
-_slow_q: "queue.Queue[tuple]" = queue.Queue()
+_slow_q: "queue.Queue[tuple]" = queue.Queue(maxsize=8)
 _screen_lock = threading.Lock()
 _screen = {"msg": None, "gen": 0}
 
@@ -1100,7 +1100,10 @@ def main() -> int:
                             Reply(loading_text(data)),
                             edit_message_id=edit_id,
                         )
-                        _slow_q.put(("cb", data, edit_id, gen, ""))
+                        try:
+                            _slow_q.put_nowait(("cb", data, edit_id, gen, ""))
+                        except queue.Full:
+                            send_reply(token, chat_id, Reply(i18n.t("job.busy")), edit_message_id=edit_id)
                         continue
                     t0 = time.monotonic()
                     try:
@@ -1134,7 +1137,10 @@ def main() -> int:
                 body = message.get("text") or ""
                 if _text_is_slow(body):
                     send_reply(token, chat_id, Reply(i18n.t("loading.generic")))
-                    _slow_q.put(("text", body, None, 0, ""))
+                    try:
+                        _slow_q.put_nowait(("text", body, None, 0, ""))
+                    except queue.Full:
+                        send_reply(token, chat_id, Reply(i18n.t("job.busy")))
                     continue
                 reply = _dispatch(body)
                 if reply.text:

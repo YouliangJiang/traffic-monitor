@@ -21,7 +21,7 @@ English: [README.en.md](README.en.md)
 ## 流量怎么计
 
 - 读内核 `/proc/net/dev` 指定网卡（默认 `eth0`）的收/发字节，入站和出站都记。
-- 差值按时间记入 `/var/lib/traffic-monitor/traffic.json`。只填重置日时，时刻按 `00:00:00`。监控进程短时间挂了但机器没重启，内核计数还在，下次采样会补上。
+- 差值按带微秒时间戳的采样区间记入 SQLite；跨周期边界按区间时长分摊，整数分摊保证总字节不丢失。数据库路径为 `/var/lib/traffic-monitor/traffic.sqlite3`。只填重置日时，时刻按 `00:00:00`。监控进程短时间挂了但机器没重启，内核计数还在，下次采样会补上。
 - 账单周期用这台机器的系统时区（`timedatectl`）。重置时刻由 `BILLING_RESET_DAY` + 可选的 `BILLING_RESET_TIME`（时:分:秒，没写的分和秒为 0，只写日期则 `00:00:00`）决定。额度按 **十进制**（`2T` = 2×10¹² 字节），与多数云厂商「套餐含入+出」的口径一致。
 - 第一次安装时会留下开机快照 `bootstrap.json`，用来补上「装监控之前、自本次开机以来」的计数。
 
@@ -56,7 +56,7 @@ English: [README.en.md](README.en.md)
 
 不要在两台机器上同时跑 bot。
 
-Hub 对 agent 只提供 **HTTPS**（TLS 1.2+，自签证书）。防火墙放行 **入站 TCP 8788**，不是 UDP，也不是 7 层。证书和私钥在 hub 的 `/var/lib/traffic-monitor/hub.{crt,key}`；部署 agent 时由脚本从 hub 拷走 `hub.crt` 做校验。Bearer token 仍要，但不再在明文 HTTP 里传。
+Hub 对 agent 只提供 **HTTPS**（TLS 1.2+，自签证书）。防火墙放行 **入站 TCP 8788**，不是 UDP，也不是 7 层。证书和私钥在 hub 的 `/var/lib/traffic-monitor/hub.{crt,key}`；部署 agent 时由脚本从 hub 拷走 `hub.crt` 做校验。每个 Agent 使用独立 Bearer 凭证；管理 API 只接受 ADMIN_TOKEN。
 
 Hub 的 `8788` **只在有 agent 要加入时**才需要对那些机器开放。只有一台机器时，bot 走本机 `https://127.0.0.1:8788`，不必对公网放行。若要放行，尽量限制来源 IP。
 
@@ -86,7 +86,7 @@ cp deploy.local.example deploy.local
   user@hk-host
 ```
 
-`FLEET_TOKEN` 可写在 `deploy.local`，或设置 `HUB_HOST` 让脚本从已有 hub 的 `/etc/traffic-monitor.env` 读取。
+设置 `HUB_HOST` 后，部署脚本会在 Hub 上登记该节点，并通过私有 SSH 管道取得独立凭证和证书。已登记节点的额度与停用状态会保留。管理凭证不下发到 Agent。
 
 额度：`500G`、`1T`、`2T`、`unlimited`。网卡不是 `eth0` 时加 `--iface`。
 
@@ -143,7 +143,9 @@ cp deploy.local.example deploy.local
 | 变量 | 含义 |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Hub 必填 |
-| `FLEET_TOKEN` | Hub 与 agent 共享的 bearer |
+| `ADMIN_TOKEN` | Hub/Bot 管理凭证，Agent 不持有 |
+| `AGENT_TOKEN` | 每个 Agent 独立的上报凭证，只能代表自己的节点 |
+| `AGENT_AUTH_FILE` | Hub 节点凭证表，默认 `/etc/traffic-monitor-agents.json`（root:trafficmon，0640） |
 | `ROLE` | `hub` 或 `agent` |
 | `NODE_NAME` | 节点名，`[a-z][a-z0-9-]{0,31}` |
 | `TRAFFIC_IFACE` | 记账网卡 |
@@ -170,3 +172,23 @@ cp deploy.local.example deploy.local
 | `traffic-cut` | 32M oneshot | 套餐断流（root，nft） |
 
 状态目录：`/var/lib/traffic-monitor`。代码安装到 `/opt/traffic-monitor`。
+
+## 升级与回滚
+
+代码安装到 `/opt/traffic-monitor-releases/<版本>`，`/opt/traffic-monitor` 原子切换到新版本。部署前保存代码、配置和 unit 备份到 `/var/backups/traffic-monitor`；服务或记账就绪检查失败时，脚本自动恢复备份。旧 `traffic.json` 首次启动时事务性迁移到 SQLite，原文件保留；迁移失败会阻止采样，不会清空用量。
+
+root 断流助手只写 `/var/lib/traffic-monitor-cut/applied.json`，应用只写自己的请求文件。助手每分钟核对实际 nftables 表和规则摘要；重启、规则丢失或规则改变都会重新应用。规则更新采用单个原子 nft 事务，失败时保留原规则。
+
+采集、通知和测量分别运行；`/healthz` 在采集线程停止或超过 90 秒未成功采集时返回 503。Agent 断网或运行测量任务不阻塞本地采集。任务具有持久化租约、接收确认和结果去重；已经开始的测速在进程中断后报告失败，不重复打流。
+
+旧分钟账本的历史精度仍为分钟，新采样区间跨边界使用均匀分摊估计；到秒的重置不会再把整个分钟排除，但这仍不是云账单对账。
+
+## 验证
+
+```bash
+python3 -m unittest discover -s tests -v
+bash -n install-host.sh deploy-remote.sh
+python3 tests/benchmark_ledger.py .
+```
+
+Linux 上的 nftables 实测必须在独立网络命名空间运行：`sudo unshare --net python3 tests/native_nft.py .`。脚本会拒绝在主机网络命名空间中运行。GitHub Actions 检查 Python 3.9 和 3.12。

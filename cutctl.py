@@ -6,6 +6,11 @@ import os
 import socket
 import subprocess
 import sys
+import fcntl
+import hashlib
+import json
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
@@ -109,7 +114,8 @@ def collect_endpoints() -> dict:
     if telegram_needed():
         tg_v4, tg_v6 = resolve_host(TG_HOST, 443)
     prev: dict = {}
-    raw = util.load_json(util.state_dir() / "cut-applied.json")
+    import cut
+    raw = cut.read_applied()
     if isinstance(raw, dict) and isinstance(raw.get("endpoints"), dict):
         prev = raw["endpoints"]
     if hub_host and not _loopback_host(hub_host) and not hub_v4 and not hub_v6:
@@ -179,11 +185,11 @@ def append_tailscale_underlay(lines: list[str], direction: str) -> None:
         lines.append(rule)
 
 
-def build_nft(want_cut: bool) -> str:
+def build_nft(want_cut: bool, endpoints: dict = None) -> str:
     if not want_cut:
         return ""
     ssh = ", ".join(str(p) for p in ssh_ports()) or "22"
-    endpoints = collect_endpoints()
+    endpoints = endpoints if endpoints is not None else collect_endpoints()
     hub_port = int(endpoints["hub_port"])
     hub_v4 = endpoints["hub4"]
     hub_v6 = endpoints["hub6"]
@@ -229,6 +235,8 @@ def build_nft(want_cut: bool) -> str:
     )
     if has_ts:
         lines.append('    oifname "tailscale0" accept')
+    if listen_hub:
+        lines.append(f"    tcp sport {hub_listen} ct state established accept")
     append_tailscale_underlay(lines, "output")
     lines.extend(
         [
@@ -255,7 +263,6 @@ def build_nft(want_cut: bool) -> str:
         lines.append('    oifname "tailscale0" accept')
     lines.extend(
         [
-            "    ct state established,related accept",
             "  }",
             "}",
             "",
@@ -264,160 +271,144 @@ def build_nft(want_cut: bool) -> str:
     return "\n".join(lines)
 
 
-def apply_rules(want: str) -> None:
-    want_cut = want == "cut"
-    delete_table()
-    if not want_cut:
-        return
-    text = build_nft(True)
-    proc = subprocess.run(
-        ["nft", "-f", "-"],
-        input=text,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or "nft failed").strip()[:500])
+def _root_state() -> Path:
+    import cut
+    directory = cut.applied_path().parent
+    directory.mkdir(parents=True, exist_ok=True, mode=0o755)
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise RuntimeError("cutoff state directory is not trusted")
+    return directory
 
 
-def _chown_trafficmon(path: Path) -> None:
+@contextmanager
+def _locked():
+    directory = _root_state()
+    fd = os.open(directory / "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        import grp
-        import pwd
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
-        uid = pwd.getpwnam("trafficmon").pw_uid
-        gid = grp.getgrnam("trafficmon").gr_gid
-        os.chown(path, uid, gid)
-    except Exception:
-        pass
+
+def _kernel_state() -> tuple[bool, str]:
+    tables = _run(["nft", "-j", "list", "tables"])
+    if tables.returncode:
+        raise RuntimeError("cannot inspect nftables tables")
+    objects = json.loads(tables.stdout).get("nftables") or []
+    exists = any((entry.get("table") or {}).get("name") == TABLE and (entry.get("table") or {}).get("family") == "inet" for entry in objects)
+    if not exists:
+        return False, ""
+    result = _run(["nft", "-j", "list", "table", "inet", TABLE])
+    if result.returncode:
+        raise RuntimeError("cannot inspect cutoff table")
+
+    def clean(value):
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items() if k not in {"handle", "metainfo"}}
+        if isinstance(value, list):
+            return [clean(v) for v in value if not (isinstance(v, dict) and "metainfo" in v)]
+        return value
+
+    digest = hashlib.sha256(json.dumps(clean(json.loads(result.stdout)), sort_keys=True).encode()).hexdigest()
+    return True, digest
+
+
+def apply_rules(want: str, endpoints: dict = None) -> None:
+    exists, _ = _kernel_state()
+    # Build first. DNS or validation failures must leave existing protection intact.
+    text = build_nft(True, endpoints) if want == "cut" else ""
+    transaction = (f"delete table inet {TABLE}\n" if exists else "") + text
+    if not transaction:
+        return
+    proc = subprocess.run(["nft", "-f", "-"], input=transaction, capture_output=True, text=True, timeout=20, check=False)
+    if proc.returncode:
+        raise RuntimeError((proc.stderr or "nft transaction failed").strip()[:500])
 
 
 def write_applied(applied: dict) -> None:
-    path = util.state_dir() / "cut-applied.json"
-    util.save_json(path, applied)
-    _chown_trafficmon(path)
+    import cut
+    _root_state()
+    util.save_json(cut.applied_path(), applied, mode=0o644)
 
 
-def main() -> int:
-    desired = util.load_json(util.state_dir() / "cut-desired.json")
-    if not isinstance(desired, dict):
-        desired = {}
-    want = str(desired.get("want") or "pass")
+def _desired() -> dict:
+    import cut
+    import report
+    path = cut.desired_path()
+    if not path.exists():
+        exists, _ = _kernel_state()
+        if exists or cut.applied_path().exists():
+            raise RuntimeError("cutoff request is missing; retaining kernel rules")
+        return {"want": "pass", "period_key": "", "armed": False}
+    if path.lstat().st_size > 65536:
+        raise ValueError("cutoff request too large")
+    desired = util.load_json(path, strict=True)
+    want = desired.get("want")
     if want not in {"cut", "pass"}:
-        want = "pass"
-    applied = {
-        "want": want,
-        "ok": False,
-        "error": "",
-        "period_key": str(desired.get("period_key") or ""),
-        "ts": "",
-    }
-    try:
-        import report
+        raise ValueError("invalid cutoff request")
+    if want == "cut":
+        day = desired.get("reset_day")
+        cap = desired.get("cap")
+        if type(day) is not int or not 1 <= day <= 31 or type(cap) is not int or cap <= 0:
+            raise ValueError("invalid cutoff billing configuration")
+        if desired.get("armed") is not True or desired.get("reset_set") is not True:
+            raise ValueError("cutoff request is not armed")
+        clock = util.parse_reset_time(desired.get("reset_time") or "00:00:00")
+        start, _ = report.billing_period(report.utcnow(), day, clock)
+        if desired.get("period_key") != start.strftime("%Y-%m-%dT%H:%M:%S"):
+            desired = dict(desired, want="pass")
+    return desired
 
-        applied["ts"] = report.utcnow().isoformat()
-    except Exception:
-        pass
-    try:
-        if not shutil_which_nft():
-            raise RuntimeError("nft not found")
-        apply_rules(want)
-        applied["ok"] = True
-        if want == "cut":
-            applied["endpoints"] = collect_endpoints()
-    except Exception as exc:
-        applied["error"] = str(exc)[:500]
-        try:
-            delete_table()
-        except Exception:
-            pass
-        write_applied(applied)
-        print(f"cutctl fail want={want} err={applied['error']}", flush=True)
-        return 1
-    write_applied(applied)
-    print(f"cutctl ok want={want}", flush=True)
+
+def _reconcile() -> int:
+    import cut
+    import report
+    previous = util.load_json(cut.applied_path(), strict=True) if cut.applied_path().exists() else {}
+    desired = _desired()
+    want = desired["want"]
+    endpoints = collect_endpoints() if want == "cut" else {}
+    exists, fingerprint = _kernel_state()
+    valid = exists if want == "cut" else not exists
+    unchanged = previous.get("want") == want and previous.get("ok") is True and previous.get("endpoints", {}) == endpoints
+    if valid and unchanged and previous.get("kernel_digest", "") == fingerprint:
+        print("cutctl reconcile noop", flush=True)
+        return 0
+    apply_rules(want, endpoints)
+    exists, fingerprint = _kernel_state()
+    if exists != (want == "cut"):
+        raise RuntimeError("kernel cutoff verification failed")
+    write_applied({"want": want, "ok": True, "error": "", "period_key": desired.get("period_key") or "", "ts": report.utcnow().isoformat(), "endpoints": endpoints, "kernel_digest": fingerprint})
+    print("cutctl ok want=" + want, flush=True)
     return 0
 
 
-def shutil_which_nft() -> bool:
-    from shutil import which
-
-    return bool(which("nft"))
+def main() -> int:
+    try:
+        with _locked():
+            try:
+                return _reconcile()
+            except Exception as exc:
+                import cut
+                import report
+                previous = cut.read_applied()
+                try:
+                    exists, _ = _kernel_state()
+                    previous["want"] = "cut" if exists else "pass"
+                except Exception:
+                    previous.setdefault("want", "pass")
+                previous.update(ok=False, error=f"{type(exc).__name__}: {exc}"[:500], ts=report.utcnow().isoformat())
+                write_applied(previous)
+                raise
+    except Exception as exc:
+        print(f"cutctl failed; protection retained: {type(exc).__name__}: {exc}", flush=True)
+        return 1
 
 
 def reconcile() -> int:
-    """Drop a cutoff that belongs to a previous period, and refresh allowlist addresses."""
-    path = util.state_dir() / "cut-desired.json"
-    desired = util.load_json(path)
-    if not isinstance(desired, dict) or not desired:
-        print("cutctl reconcile noop", flush=True)
-        return 0
-    import cut as cutmod
-    import report
-
-    reset_day = int(desired.get("reset_day") or util.env_int("BILLING_RESET_DAY", 1))
-    try:
-        reset_time = util.parse_reset_time(
-            str(desired.get("reset_time") or util.env_opt("BILLING_RESET_TIME", "00:00:00"))
-        )
-    except ValueError:
-        reset_time = "00:00:00"
-    reset_set = bool(desired.get("reset_set", True))
-    if "cap" in desired:
-        raw_cap = desired.get("cap")
-    else:
-        raw_cap = util.env_opt("MONTHLY_CAP_BYTES", "0")
-    if raw_cap in (None, "", 0, "0"):
-        cap = None
-    else:
-        try:
-            cap = int(raw_cap)
-        except (TypeError, ValueError):
-            cap = None
-    is_armed = cutmod.armed(cap, reset_day, reset_set)
-    start, _end = report.billing_period(report.utcnow(), reset_day, reset_time)
-    period_key = start.strftime("%Y-%m-%dT%H:%M:%S")
-    want = str(desired.get("want") or "pass")
-    if want not in {"cut", "pass"}:
-        want = "pass"
-    rolled = want == "cut" and (not is_armed or str(desired.get("period_key") or "") != period_key)
-    if rolled:
-        desired.update(
-            {
-                "want": "pass",
-                "period_key": period_key,
-                "armed": is_armed,
-                "reset_day": reset_day,
-                "reset_time": reset_time,
-                "reset_set": reset_set,
-                "cap": cap,
-                "ts": report.utcnow().isoformat(),
-            }
-        )
-        util.save_json(path, desired)
-        _chown_trafficmon(path)
-        print("cutctl reconcile restore period=%s" % period_key, flush=True)
-    applied_now = util.load_json(util.state_dir() / "cut-applied.json")
-    if not isinstance(applied_now, dict):
-        applied_now = {}
-    endpoints = collect_endpoints() if str(desired.get("want") or "pass") == "cut" else {}
-    endpoints_changed = str(desired.get("want") or "") == "cut" and (applied_now.get("endpoints") or {}) != endpoints
-    applied_want = str(applied_now.get("want") or "")
-    current_want = str(desired.get("want") or "pass")
-    if (
-        not rolled
-        and not endpoints_changed
-        and applied_want == current_want
-        and applied_now.get("ok") is True
-    ):
-        print("cutctl reconcile noop", flush=True)
-        return 0
     return main()
 
 
 if __name__ == "__main__":
-    if "--reconcile" in sys.argv:
-        sys.exit(reconcile())
     sys.exit(main())

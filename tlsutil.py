@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 import ssl
 import subprocess
@@ -89,6 +90,8 @@ def as_https(url: str, default_host: str = "127.0.0.1", default_port: int = 8788
 def ensure_hub_cert(dns_names: list[str], ip_names: list[str]) -> tuple[Path, Path]:
     crt, key = cert_paths()
     crt.parent.mkdir(parents=True, exist_ok=True)
+    if crt.is_symlink() or key.is_symlink():
+        raise RuntimeError("TLS files must not be symlinks")
     if crt.is_file() and key.is_file():
         return crt, key
     alt_lines = [f"DNS.{i} = {name}" for i, name in enumerate(dns_names, start=1)]
@@ -119,6 +122,7 @@ def ensure_hub_cert(dns_names: list[str], ip_names: list[str]) -> tuple[Path, Pa
         raise SystemExit("openssl is required to create the hub TLS certificate")
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "hub.cnf"
+        temporary_key, temporary_crt = Path(tmp) / "hub.key", Path(tmp) / "hub.crt"
         cfg.write_text(config, encoding="utf-8")
         try:
             subprocess.run(
@@ -132,9 +136,9 @@ def ensure_hub_cert(dns_names: list[str], ip_names: list[str]) -> tuple[Path, Pa
                     "-days",
                     "825",
                     "-keyout",
-                    str(key),
+                    str(temporary_key),
                     "-out",
-                    str(crt),
+                    str(temporary_crt),
                     "-config",
                     str(cfg),
                 ],
@@ -144,8 +148,10 @@ def ensure_hub_cert(dns_names: list[str], ip_names: list[str]) -> tuple[Path, Pa
             )
         except subprocess.CalledProcessError as exc:
             raise SystemExit(exc.stderr or exc.stdout or str(exc)) from exc
-    key.chmod(0o600)
-    crt.chmod(0o644)
+        temporary_key.chmod(0o600)
+        temporary_crt.chmod(0o644)
+        os.replace(temporary_key, key)
+        os.replace(temporary_crt, crt)
     return crt, key
 
 

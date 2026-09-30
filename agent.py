@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 import traceback
+import threading
+import json
 from typing import Any, Optional
 
 import cut
@@ -36,7 +38,7 @@ def load_billing() -> tuple[Optional[int], int, str, bool]:
     reset_day = util.env_int("BILLING_RESET_DAY", 1)
     reset_time = _reset_time()
     reset_set = bool(util.env_opt("BILLING_RESET_DAY"))
-    saved = util.load_json(_billing_path())
+    saved = _read_billing()
     if isinstance(saved, dict) and saved:
         if "cap_bytes" in saved:
             raw = saved.get("cap_bytes")
@@ -54,7 +56,7 @@ def load_billing() -> tuple[Optional[int], int, str, bool]:
 
 
 def _read_billing() -> dict:
-    data = util.load_json(_billing_path())
+    data = util.load_json(_billing_path(), strict=True) if _billing_path().exists() else {}
     return data if isinstance(data, dict) else {}
 
 
@@ -63,13 +65,15 @@ def install_push() -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def store_billing(cap: Optional[int], reset_day: int, reset_time: str, reset_set: bool) -> None:
+def store_billing(cap: Optional[int], reset_day: int, reset_time: str, reset_set: bool, enabled: bool = True, kicked: bool = False) -> None:
     prev = _read_billing()
     payload = {
         "cap_bytes": cap,
         "reset_day": int(reset_day),
         "reset_time": reset_time,
         "reset_set": bool(reset_set),
+        "enabled": enabled,
+        "kicked": kicked,
     }
     if prev.get("from_install"):
         payload["from_install"] = prev["from_install"]
@@ -98,96 +102,110 @@ def execute_job(job: dict[str, Any], iface: str, *, cutting: bool) -> dict[str, 
         return {"id": job_id, "ok": False, "error": str(exc)}
 
 
+def cached_job(job: dict[str, Any], iface: str, *, cutting: bool) -> dict[str, Any]:
+    """Persist execution intent before generating traffic; never repeat a started job."""
+    path = util.state_dir() / "jobs-seen.json"
+    cache = util.load_json(path, strict=True) if path.exists() else {}
+    job_id = str(job.get("id") or "")
+    previous = cache.get(job_id)
+    if previous and previous.get("state") == "done":
+        return previous["result"]
+    if previous and previous.get("state") == "started":
+        result = {"id": job_id, "ok": False, "error": "measurement interrupted; not repeated"}
+    else:
+        cache[job_id] = {"state": "started", "job": job, "ts": time.time()}
+        util.save_json(path, cache)
+        result = execute_job(job, iface, cutting=cutting)
+    cache[job_id] = {"state": "done", "result": result, "ts": time.time()}
+    cache = dict(sorted(cache.items(), key=lambda item: item[1].get("ts", 0))[-64:])
+    util.save_json(path, cache)
+    return result
+
+
 def main() -> None:
-    hub_url = util.env("FLEET_HUB_URL").rstrip("/")
-    token = util.env("FLEET_TOKEN")
+    hub_url, token = util.env("FLEET_HUB_URL").rstrip("/"), util.env("AGENT_TOKEN")
     name = util.normalize_node_name(util.env("NODE_NAME"))
     if not util.valid_node_name(name):
-        raise SystemExit("NODE_NAME must match [a-z][a-z0-9-]{0,31}")
+        raise SystemExit("invalid NODE_NAME")
     iface = util.env_opt("TRAFFIC_IFACE", "eth0")
-    cap, reset_day, reset_time, reset_set = load_billing()
-    pending_result: dict[str, Any] | None = None
-    backlog: list[dict[str, Any]] = []
-    watch: list[dict[str, Any]] = []
-    enabled = True
-    kicked = False
+    cap, day, clock, reset_set = load_billing()
+    saved = _read_billing()
+    configuration = {"cap": cap, "day": day, "clock": clock, "reset_set": reset_set, "enabled": bool(saved.get("enabled", True)), "kicked": bool(saved.get("kicked", False)), "svc": []}
+    lock, wake, ready = threading.Lock(), threading.Event(), threading.Event()
+    current = {"snapshot": None}
+
+    def collect():
+        while True:
+            with lock:
+                config = dict(configuration)
+            try:
+                snap = snapshot.build_snapshot(iface, config["day"], config["svc"], reset_time=config["clock"], cap=config["cap"], reset_set=config["reset_set"], allow_cut=config["enabled"] and not config["kicked"])
+                with lock:
+                    current["snapshot"] = snap
+                ready.set()
+            except Exception:
+                traceback.print_exc()
+            wake.wait(20)
+            wake.clear()
+
+    threading.Thread(target=collect, name="agent-collect", daemon=True).start()
+    cache_path = util.state_dir() / "jobs-seen.json"
+    cache = util.load_json(cache_path, strict=True) if cache_path.exists() else {}
+    pending_job = next((entry.get("job") for entry in cache.values() if entry.get("state") in {"received", "started"}), None)
+    pending_result = next((entry["result"] for entry in cache.values() if entry.get("state") == "done" and not entry.get("confirmed")), None)
     print(f"traffic-agent node={name} hub={hub_url}", flush=True)
     while True:
-        snap: dict[str, Any] = {}
+        if not ready.wait(20):
+            continue
+        with lock:
+            snap, config = current["snapshot"], dict(configuration)
+        import report
+        stamp = report.parse_iso_datetime(snap.get("ts")) if snap else None
+        if not stamp or time.time() - stamp.timestamp() > 90:
+            time.sleep(2)
+            continue
+        payload = {"name": name, "snapshot": snap, "wait": 0 if pending_job or pending_result else 25}
         try:
-            allow_cut = enabled and not kicked
-            snap = snapshot.build_snapshot(
-                iface,
-                reset_day,
-                watch,
-                reset_time=reset_time,
-                cap=cap,
-                reset_set=reset_set,
-                allow_cut=allow_cut,
-            )
-            payload = {
-                "name": name,
-                "iface": iface,
-                "reset_day": reset_day,
-                "reset_time": reset_time,
-                "reset_set": reset_set,
-                "cap_bytes": cap,
-                "snapshot": snap,
-                "wait": 0 if backlog else 25,
-            }
-            push = install_push()
-            if push:
-                payload["apply_config"] = push
+            if pending_job:
+                util.http_json("POST", hub_url + "/v1/sync", token, dict(payload, wait=0, job_ack=pending_job["id"]), timeout=15)
+                pending_result = cached_job(pending_job, iface, cutting=(snap.get("cut") or {}).get("want") == "cut")
+                pending_job = None
             if pending_result:
                 payload["job_result"] = pending_result
-            body = util.http_json("POST", f"{hub_url}/v1/sync", token, payload, timeout=40)
-            pending_result = None
-            if push:
-                clear_install_push()
-            kicked = False
-            watch = util.normalize_svc_list(body.get("svc"))
-            if "cap_bytes" in body:
-                raw_cap = body.get("cap_bytes")
-                cap = None if raw_cap in (None, "", 0, "0") else int(raw_cap)
-            if body.get("reset_day"):
-                reset_day = int(body.get("reset_day") or reset_day)
-            if body.get("reset_time"):
-                try:
-                    reset_time = util.parse_reset_time(str(body.get("reset_time")))
-                except ValueError:
-                    pass
-            if "reset_set" in body:
-                reset_set = bool(body.get("reset_set"))
-            if "enabled" in body:
-                enabled = bool(body.get("enabled"))
-                if not enabled:
-                    cut.force_pass(str(snap.get("period_key") or ""))
-            store_billing(cap, reset_day, reset_time, reset_set)
-            jobs = list(body.get("jobs") or [])
-            queued = list(backlog)
-            backlog = []
-            if queued:
-                seen = {str(item.get("id") or "") for item in jobs}
-                jobs = [item for item in queued if str(item.get("id") or "") not in seen] + jobs
-            cutting = allow_cut and cut.should_cut(
-                int(snap.get("period_total") or 0), cap, reset_day, reset_set
-            )
+                payload["wait"] = 0
+            body = util.http_json("POST", hub_url + "/v1/sync", token, payload, timeout=40)
+            if pending_result:
+                cache = util.load_json(cache_path, strict=True)
+                cache[pending_result["id"]]["confirmed"] = True
+                util.save_json(cache_path, cache)
+                pending_result = None
+            with lock:
+                configuration.update(cap=body.get("cap_bytes"), day=int(body.get("reset_day") or 1), clock=body.get("reset_time") or "00:00:00", reset_set=bool(body.get("reset_set", True)), enabled=bool(body.get("enabled", True)), kicked=False, svc=util.normalize_svc_list(body.get("svc")))
+                updated = dict(configuration)
+            store_billing(updated["cap"], updated["day"], updated["clock"], updated["reset_set"], updated["enabled"], False)
+            if any(config[key] != updated[key] for key in configuration):
+                wake.set()
+            jobs = body.get("jobs") or []
             if jobs:
-                pending_result = execute_job(jobs[0], iface, cutting=cutting)
-                backlog = jobs[1:]
+                pending_job = jobs[0]
+                cache = util.load_json(cache_path, strict=True) if cache_path.exists() else {}
+                if pending_job["id"] not in cache:
+                    cache[pending_job["id"]] = {"state": "received", "job": pending_job, "ts": time.time()}
+                    util.save_json(cache_path, cache)
         except util.HubError as exc:
             if exc.code == 403:
-                kicked = True
-                cut.force_pass(str(snap.get("period_key") or ""))
+                with lock:
+                    configuration.update(kicked=True, enabled=False)
+                    updated = dict(configuration)
+                store_billing(updated["cap"], updated["day"], updated["clock"], updated["reset_set"], False, True)
+                wake.set()
             else:
                 traceback.print_exc()
             time.sleep(5)
-            continue
         except Exception:
             traceback.print_exc()
             time.sleep(5)
-            continue
-        if not pending_result:
+        if not pending_job and not pending_result:
             time.sleep(1)
 
 

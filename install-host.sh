@@ -34,7 +34,7 @@ usage: install-host.sh --role hub|agent [options]
   --hub URL          agent: fleet hub, e.g. https://HUB_HOST:8788
   --name NAME        node name, e.g. sg
   --cap 2T|500G|unlimited
-  --reset 27|27T08:00:00   UTC; time defaults to 00:00:00
+  --reset 27|27T08:00:00   Host local time; time defaults to 00:00:00
   --iface eth0
 EOF
             exit 0
@@ -50,13 +50,13 @@ if [[ "$ROLE" != hub && "$ROLE" != agent ]]; then
     echo "role must be hub or agent" >&2
     exit 2
 fi
-if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" ]]; then
+if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" && ! -f /etc/traffic-monitor.env ]]; then
     echo "agent role needs --hub URL" >&2
     exit 2
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
+for required in protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
     locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer \
@@ -94,6 +94,10 @@ import os
 import pathlib
 import secrets
 import sys
+import hashlib
+import shutil
+import tempfile
+import grp
 
 sys.path.insert(0, sys.argv[1])
 import tlsutil
@@ -103,27 +107,11 @@ bundle = pathlib.Path(sys.argv[1])
 role = os.environ["INSTALL_ROLE"]
 iface = os.environ.get("INSTALL_IFACE") or "eth0"
 
-opt = pathlib.Path("/opt/traffic-monitor")
-opt.mkdir(parents=True, exist_ok=True)
+# Validate the complete bundle before modifying the current installation.
 for src in bundle.glob("*.py"):
-    dest = opt / src.name
-    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    dest.chmod(0o644)
-loc = opt / "locales"
-loc.mkdir(parents=True, exist_ok=True)
+    compile(src.read_text(encoding="utf-8"), str(src), "exec")
 for src in (bundle / "locales").glob("*.json"):
-    dest = loc / src.name
-    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    dest.chmod(0o644)
-opt.chmod(0o755)
-
-unit_dir = pathlib.Path("/etc/systemd/system")
-for src in (bundle / "systemd").iterdir():
-    if not src.is_file():
-        continue
-    dest = unit_dir / src.name
-    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    dest.chmod(0o644)
+    json.loads(src.read_text(encoding="utf-8"))
 
 env_path = pathlib.Path("/etc/traffic-monitor.env")
 current = {}
@@ -165,9 +153,10 @@ hub_url = tlsutil.as_https(
     "127.0.0.1",
     port,
 )
-fleet_token = keep("FLEET_TOKEN")
-if role == "hub" and not fleet_token:
-    fleet_token = secrets.token_hex(24)
+admin_token = keep("ADMIN_TOKEN")
+if role == "hub" and not admin_token:
+    admin_token = secrets.token_urlsafe(32)
+agent_token = keep("AGENT_TOKEN")
 
 public_url = keep("FLEET_PUBLIC_URL")
 if public_url:
@@ -188,20 +177,34 @@ merged = {
     "HUB_URL": local_hub if role == "hub" else hub_url,
     "FLEET_HUB_URL": hub_url if role == "agent" else local_hub,
     "FLEET_PUBLIC_URL": public_url,
-    "FLEET_TOKEN": fleet_token,
-    "TELEGRAM_BOT_TOKEN": keep("TELEGRAM_BOT_TOKEN"),
-    "TELEGRAM_CHAT_ID": keep("TELEGRAM_CHAT_ID"),
+    "ADMIN_TOKEN": admin_token if role == "hub" else "",
+    "AGENT_TOKEN": agent_token if role == "agent" else "",
+    "AGENT_AUTH_FILE": keep("AGENT_AUTH_FILE", "/etc/traffic-monitor-agents.json") if role == "hub" else "",
+    "TELEGRAM_BOT_TOKEN": keep("TELEGRAM_BOT_TOKEN") if role == "hub" else "",
+    "TELEGRAM_CHAT_ID": keep("TELEGRAM_CHAT_ID") if role == "hub" else "",
     "HUB_CA": keep("HUB_CA", "/var/lib/traffic-monitor/hub.crt"),
     "UI_LANG": keep("UI_LANG", "zh"),
 }
 if role == "hub" and not merged["TELEGRAM_BOT_TOKEN"]:
     raise SystemExit("hub role needs TELEGRAM_BOT_TOKEN in /etc/traffic-monitor.env")
-if role == "agent" and not merged["FLEET_TOKEN"]:
-    raise SystemExit("agent role needs FLEET_TOKEN")
+if role == "agent" and not merged["AGENT_TOKEN"]:
+    raise SystemExit("agent role needs an enrolled AGENT_TOKEN")
 
 lines = [f"{key}={merged[key]}" for key in sorted(merged) if merged[key] != ""]
-env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+fd, temporary_env = tempfile.mkstemp(prefix=".traffic-monitor-env-", dir=env_path.parent)
+with os.fdopen(fd, "w") as output:
+    output.write("\n".join(lines) + "\n")
+    output.flush()
+    os.fsync(output.fileno())
+os.replace(temporary_env, env_path)
 env_path.chmod(0o600)
+if role == "hub":
+    auth = pathlib.Path(merged["AGENT_AUTH_FILE"])
+    if not auth.exists():
+        util.save_json(auth, {"agents": {}}, mode=0o640)
+    util.load_json(auth, strict=True)
+    auth.chmod(0o640)
+    os.chown(auth, 0, grp.getgrnam("trafficmon").gr_gid)
 
 state_dir = pathlib.Path("/var/lib/traffic-monitor")
 state_dir.mkdir(parents=True, exist_ok=True)
@@ -243,7 +246,7 @@ if not bootstrap.exists():
         "rx_bytes": rx,
         "tx_bytes": tx,
     }
-    bootstrap.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    util.save_json(bootstrap, payload, mode=0o644)
 
 explicit_cap = bool(os.environ.get("INSTALL_CAP"))
 explicit_reset = bool(os.environ.get("INSTALL_RESET"))
@@ -277,7 +280,7 @@ if explicit_cap or explicit_reset:
         nodes[node_name] = rec
         inv["nodes"] = nodes
         inv["kicked"] = inv.get("kicked") if isinstance(inv.get("kicked"), list) else []
-        inv_path.write_text(json.dumps(inv, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        util.save_json(inv_path, inv)
     else:
         bill_path = state_dir / "billing.json"
         bill = {}
@@ -290,22 +293,81 @@ if explicit_cap or explicit_reset:
             bill = {}
         bill.update(pushed)
         bill["from_install"] = pushed
-        bill_path.write_text(json.dumps(bill, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        util.save_json(bill_path, bill)
+
+release_files = sorted(bundle.glob("*.py")) + sorted((bundle / "locales").glob("*.json")) + sorted((bundle / "systemd").iterdir())
+identity = hashlib.sha256()
+for src in release_files:
+    identity.update(str(src.relative_to(bundle)).encode())
+    identity.update(src.read_bytes())
+version = identity.hexdigest()[:20]
+releases = pathlib.Path("/opt/traffic-monitor-releases")
+releases.mkdir(mode=0o755, exist_ok=True)
+release = releases / version
+if not release.exists():
+    staging = pathlib.Path(tempfile.mkdtemp(prefix=".stage-", dir=releases))
+    for src in bundle.glob("*.py"):
+        shutil.copyfile(src, staging / src.name)
+        (staging / src.name).chmod(0o644)
+    shutil.copytree(bundle / "locales", staging / "locales")
+    shutil.copytree(bundle / "systemd", staging / "systemd")
+    (staging / "release-id").write_text(version + "\n")
+    staging.chmod(0o755)
+    staging.rename(release)
+opt = pathlib.Path("/opt/traffic-monitor")
+previous = ""
+if opt.is_symlink():
+    previous = os.readlink(opt)
+elif opt.exists():
+    legacy = releases / ("legacy-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S"))
+    opt.rename(legacy)
+    previous = str(legacy)
+if previous and previous != str(release):
+    (release / "previous-release").write_text(previous + "\n")
+link_directory = pathlib.Path(tempfile.mkdtemp(prefix=".traffic-monitor-link-", dir="/opt"))
+link = link_directory / "current"
+link.symlink_to(release)
+os.replace(link, opt)
+link_directory.rmdir()
+for src in (bundle / "systemd").iterdir():
+    destination = pathlib.Path("/etc/systemd/system") / src.name
+    fd, temporary = tempfile.mkstemp(prefix=".traffic-unit-", dir=destination.parent)
+    with os.fdopen(fd, "wb") as output:
+        output.write(src.read_bytes())
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, destination)
+root_state = pathlib.Path("/var/lib/traffic-monitor-cut")
+root_state.mkdir(mode=0o755, exist_ok=True)
+if root_state.is_symlink() or root_state.stat().st_uid != 0:
+    raise SystemExit("untrusted root cutoff state directory")
+root_state.chmod(0o755)
 
 print(f"installed role={role} node={node_name}")
 PY
 
-chown -R trafficmon:trafficmon /var/lib/traffic-monitor
-chmod 0755 /var/lib/traffic-monitor
-chmod 0644 /var/lib/traffic-monitor/bootstrap.json 2>/dev/null || true
-if [[ -f "$bundle_dir/hub.crt" ]]; then
-    install -m 0644 "$bundle_dir/hub.crt" /var/lib/traffic-monitor/hub.crt
-fi
-if [[ -f /var/lib/traffic-monitor/hub.key ]]; then
-    chmod 0600 /var/lib/traffic-monitor/hub.key
-fi
-chmod 0644 /var/lib/traffic-monitor/hub.crt 2>/dev/null || true
-chown trafficmon:trafficmon /var/lib/traffic-monitor/hub.crt /var/lib/traffic-monitor/hub.key 2>/dev/null || true
+python3 - "$bundle_dir" <<'PYSEC'
+import os,pathlib,pwd,sys
+sys.path.insert(0,sys.argv[1])
+import util
+state=pathlib.Path('/var/lib/traffic-monitor')
+owner=pwd.getpwnam('trafficmon')
+for directory,folders,files,fd in os.fwalk(state,follow_symlinks=False):
+    os.fchown(fd,owner.pw_uid,owner.pw_gid)
+    for name in files:
+        os.chown(name,owner.pw_uid,owner.pw_gid,dir_fd=fd,follow_symlinks=False)
+bundle=pathlib.Path(sys.argv[1])
+if (bundle/'hub.crt').is_file():
+    import tempfile
+    fd,name=tempfile.mkstemp(prefix='.hub-certificate-',dir=state)
+    with os.fdopen(fd,'wb') as stream:stream.write((bundle/'hub.crt').read_bytes())
+    os.replace(name,state/'hub.crt')
+for name,mode in [('hub.crt',0o644),('hub.key',0o600),('bootstrap.json',0o644)]:
+    path=state/name
+    if path.exists():
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        try:os.fchmod(fd,mode);os.fchown(fd,owner.pw_uid,owner.pw_gid)
+        finally:os.close(fd)
+PYSEC
 chmod 0600 /etc/traffic-monitor.env
 chown root:root /etc/traffic-monitor.env
 python3 -m py_compile /opt/traffic-monitor/*.py
@@ -324,14 +386,6 @@ systemctl restart traffic-cut.path
 systemctl reset-failed traffic-cut.service traffic-cut-reconcile.service >/dev/null 2>&1 || true
 systemctl restart traffic-cut.timer
 systemctl start traffic-cut.service >/dev/null 2>&1 || true
-for leftover in vnstat.service vnstatd.service; do
-    if systemctl list-unit-files --no-pager --no-legend "$leftover" 2>/dev/null | grep -q .; then
-        systemctl disable --now "$leftover" >/dev/null 2>&1 || true
-    fi
-done
-rm -f /etc/systemd/system/vnstat.service.d/memory.conf \
-      /etc/systemd/system/vnstatd.service.d/memory.conf
-
 if [[ "$ROLE" == hub ]]; then
     systemctl disable --now traffic-agent.service >/dev/null 2>&1 || true
     systemctl enable --now traffic-hub.service traffic-bot.service traffic-monitor.timer
