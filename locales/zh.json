@@ -272,5 +272,19 @@
   "security.evidence.non_tls": "同一来源多次向加密端口发送非加密协议内容",
   "security.evidence.syn": "同一来源大量建立连接，绝大多数未发送加密握手",
   "security.evidence.background": "只观察到首包，尚不足以判为异常探测",
-  "security.signal_facts_unknown": "端口 {port} · 关联 {flows} 次连接"
+  "security.signal_facts_unknown": "端口 {port} · 关联 {flows} 次连接",
+  "security.ip.pending": "IP 信息查询中",
+  "security.ip.unavailable": "IP 信息暂不可用",
+  "security.ip.invalid": "地址格式无效",
+  "security.ip.non_public": "私网／保留地址",
+  "security.ip.location": "位置参考：{place}",
+  "security.ip.scanner": "疑似 {name} 扫描节点",
+  "security.ip.hosting": "云／托管网络（推测）",
+  "security.ip.stale": "缓存信息，待更新",
+  "security.ip.ptr": "反向域名（{ip}）：{hostname} · {check}",
+  "security.ip.verified": "正反向校验一致",
+  "security.ip.unverified": "未通过正向校验",
+  "security.ip.isp": "网络运营方：{name}",
+  "security.ip.note": "位置及归属来自 IP 数据库与 DNS，属于推测，不能确认实际操作者。",
+  "security.ip.dbip": "<a href=\"https://db-ip.com\">IP 国家／ASN 数据：DB-IP Lite</a>"
 }

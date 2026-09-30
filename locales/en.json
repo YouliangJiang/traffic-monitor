@@ -272,5 +272,19 @@
   "security.evidence.non_tls": "One source repeatedly sent non-TLS content to a TLS port",
   "security.evidence.syn": "Many connections from one source never sent a TLS handshake",
   "security.evidence.background": "A first packet alone is insufficient to classify a probe",
-  "security.signal_facts_unknown": "Port {port} · {flows} related connections"
+  "security.signal_facts_unknown": "Port {port} · {flows} related connections",
+  "security.ip.pending": "IP context lookup pending",
+  "security.ip.unavailable": "IP context unavailable",
+  "security.ip.invalid": "Invalid address",
+  "security.ip.non_public": "Private/reserved address",
+  "security.ip.location": "Approx. location: {place}",
+  "security.ip.scanner": "Possible {name} scanner",
+  "security.ip.hosting": "Likely cloud/hosting network",
+  "security.ip.stale": "Cached data awaiting refresh",
+  "security.ip.ptr": "Reverse DNS ({ip}): {hostname} · {check}",
+  "security.ip.verified": "Forward and reverse DNS agree",
+  "security.ip.unverified": "Forward DNS not confirmed",
+  "security.ip.isp": "Network operator: {name}",
+  "security.ip.note": "Location and ownership are estimates from IP databases and DNS, not confirmed operator identity.",
+  "security.ip.dbip": "<a href=\"https://db-ip.com\">IP country/ASN data: DB-IP Lite</a>"
 }

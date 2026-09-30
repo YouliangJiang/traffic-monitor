@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 import util
+import ip_enrichment
 
 MAX_EVENT_BYTES = 16384
 MAX_BATCH_BYTES = 65536
@@ -403,6 +404,25 @@ class EventStore:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS sensors(node TEXT PRIMARY KEY,received REAL NOT NULL,data TEXT NOT NULL)"
             )
+        try:
+            self.ip_context = ip_enrichment.IPContext()
+        except Exception as exc:
+            print("IP context disabled: " + type(exc).__name__, flush=True)
+            self.ip_context = None
+
+    def enrich(self, values):
+        if self.ip_context:
+            return self.ip_context.events(values)
+        return [
+            dict(
+                value,
+                source_info={
+                    ip: {"status": "unavailable"}
+                    for ip in value.get("probe_source_ips") or []
+                },
+            )
+            for value in values
+        ]
 
     def ingest(self, node, events, status):
         if (
@@ -459,6 +479,9 @@ class EventStore:
             )
             db.execute("DELETE FROM events WHERE received<?", (now - 30 * 86400,))
             db.execute("COMMIT")
+        self.enrich(
+            [value for value in clean if value["severity"] in {"high", "medium"}]
+        )
         return [event["event_id"] for event in clean]
 
     def sensor(self, node):
@@ -485,7 +508,8 @@ class EventStore:
                 + "ORDER BY received DESC LIMIT ?",
                 ((node, limit) if node else (limit,)),
             ).fetchall()
-            return [dict(json.loads(row["data"]), node=row["node"]) for row in rows]
+            values = [dict(json.loads(row["data"]), node=row["node"]) for row in rows]
+        return self.enrich(values)
 
     def detail(self, node, identity):
         with database("security-events.sqlite3") as db:
@@ -495,11 +519,12 @@ class EventStore:
                 "SELECT data FROM events WHERE node=? AND id LIKE ? LIMIT 2",
                 (node, identity + "%"),
             ).fetchall()
-            return (
+            value = (
                 dict(json.loads(matches[0]["data"]), node=node)
                 if len(matches) == 1
                 else None
             )
+        return self.enrich([value])[0] if value else None
 
     def summary(self, start, end):
         with database("security-events.sqlite3") as db:
@@ -549,9 +574,9 @@ class EventStore:
             "end": end,
             "counts": [dict(row) for row in counts],
             "last_hour": {row["severity"]: row["count"] for row in recent_counts},
-            "events": [
-                dict(json.loads(row["data"]), node=row["node"]) for row in samples
-            ],
+            "events": self.enrich(
+                [dict(json.loads(row["data"]), node=row["node"]) for row in samples]
+            ),
         }
 
     def pending(self):

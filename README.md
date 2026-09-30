@@ -162,6 +162,18 @@ Hub 用 `security-events.sqlite3` 按节点与事件 ID 去重，保存 30 天�
 `python3 hub.py --daily-preview` 只预览，不发送。失败日报每 5 分钟重试，已成功日期
 写入 `daily-sent.json`。普通 HTTPS 节点使用 `tls_observation`，禁用 REALITY 差分归因。
 
+来源归属由独立 `ip_data.py`（本地数据）和 `ip_enrichment.py`（后台缓存／DNS）处理。
+Hub 的 `traffic-ipdata.timer` 每天新加坡时间 04:00 检查 DB-IP Lite 国家与 ASN 库，
+供应方按月发布；流式导入 SQLite、校验后原子替换，失败保留旧库。运行时只读区间索引，
+数据库缓存 1 MiB，不引入 pip 依赖。首次部署可运行 `systemctl start traffic-ipdata.service`。
+数据位于 `/var/lib/traffic-monitor-ipdata/geo.sqlite3`，版本更新自动使 IP 缓存刷新。
+
+国家显示名称、云／托管网络推测规则和扫描域名在独立 `data/ip-rules.json`，
+运行时优先读取数据目录的 `rules.json`。公开 Censys 扫描网段由更新任务定期同步；
+域名归属必须通过 PTR 与正向 DNS 校验才推测为相应扫描节点。识别不会降低原风险等级。
+默认不调用在线地理 API；`IP_CONTEXT_ONLINE=1` 可启用本地库缺失时的 HTTPS 补充查询。
+位置与网络归属属于数据库／DNS推测，不确认实际操作者；报告保留 DB-IP 数据来源链接。
+
 ## `/etc/traffic-monitor.env`
 
 对照 `traffic-monitor.env.example`。不要把填好的文件提交到 git。

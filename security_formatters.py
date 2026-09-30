@@ -3,6 +3,7 @@
 from datetime import datetime
 import i18n
 import report
+import ip_data
 from security_events import SG, timestamp
 
 WINDOWS = {1: "1h", 24: "24h", 168: "7d"}
@@ -51,11 +52,51 @@ def evidence(event):
     return labels[:4] or [behavior(event)]
 
 
+def ip_context(info):
+    status = info.get("status")
+    if status in {"pending", "unavailable", "invalid", "non_public"}:
+        return i18n.t("security.ip." + status)
+    values = []
+    if info.get("scanner"):
+        values.append(i18n.t("security.ip.scanner", name=info["scanner"]))
+    country = info.get("country", "")
+    if i18n.lang() == "zh":
+        country = (
+            ip_data.country_name(info.get("country_code"), "zh")
+            if info.get("country_code")
+            else country
+        )
+    place = list(
+        dict.fromkeys(
+            value for value in [country, info.get("region"), info.get("city")] if value
+        )
+    )
+    if place:
+        values.append(i18n.t("security.ip.location", place=" / ".join(place)[:140]))
+    network = ("AS" + str(info["asn"]) + " " if info.get("asn") else "") + (
+        info.get("org") or info.get("isp") or ""
+    )
+    if network:
+        values.append(network[:100])
+    if not info.get("scanner") and info.get("network_type") == "hosting":
+        values.append(i18n.t("security.ip.hosting"))
+    if info.get("stale"):
+        values.append(i18n.t("security.ip.stale"))
+    return " · ".join(values)[:300] or i18n.t("security.ip.unavailable")
+
+
 def sources(event, limit=3):
     values = list(dict.fromkeys(event.get("probe_source_ips") or []))
     if not values:
         return i18n.t("security.source_missing")
-    text = ", ".join(report.h(value[:64]) for value in values[:limit])
+    details = event.get("source_info") or {}
+    parts = []
+    for value in values[:limit]:
+        line = report.h(value[:64])
+        if value in details:
+            line += " · " + report.h(ip_context(details[value]))
+        parts.append(line)
+    text = "\n".join(parts)
     if len(values) > limit:
         text += i18n.t("security.source_more", count=len(values))
     return text
@@ -101,6 +142,26 @@ def notification(node, event):
         "\n" + i18n.t("security.why"),
     ]
     lines.extend("• " + report.h(label) for label in evidence(event))
+    details = event.get("source_info") or {}
+    for ip in list(dict.fromkeys(event.get("probe_source_ips") or []))[:2]:
+        info = details.get(ip) or {}
+        if info.get("hostname"):
+            lines.append(
+                i18n.t(
+                    "security.ip.ptr",
+                    ip=report.h(ip[:64]),
+                    hostname=report.h(info["hostname"][:160]),
+                    check=i18n.t("security.ip.verified")
+                    if info.get("forward_verified")
+                    else i18n.t("security.ip.unverified"),
+                )
+            )
+        if info.get("isp") and info.get("isp") != info.get("org"):
+            lines.append(i18n.t("security.ip.isp", name=report.h(info["isp"][:100])))
+    if any(info.get("status") in {"ready", "partial"} for info in details.values()):
+        lines.append(i18n.t("security.ip.note"))
+    if any(info.get("provider") == "DB-IP Lite" for info in details.values()):
+        lines.append(i18n.t("security.ip.dbip"))
     if event.get("sni"):
         lines.append("SNI: " + report.h(event["sni"][:120]))
     if event.get("backfill"):
@@ -231,6 +292,12 @@ def overview(rows, risk):
     lines.append("\n" + coverage(rows))
     if overall["low"]:
         lines.append(i18n.t("security.background", count=overall["low"]))
+    if any(
+        info.get("provider") == "DB-IP Lite"
+        for event in risk["events"]
+        for info in (event.get("source_info") or {}).values()
+    ):
+        lines.append(i18n.t("security.ip.dbip"))
     return "\n".join(lines)
 
 
@@ -248,6 +315,12 @@ def daily(rows, risk, start, end):
     lines.extend(node_lines(rows, by_node))
     lines.extend(focus_lines(risk["events"], compact=True))
     lines.append(i18n.t("security.observed_window"))
+    if any(
+        info.get("provider") == "DB-IP Lite"
+        for event in risk["events"]
+        for info in (event.get("source_info") or {}).values()
+    ):
+        lines.append(i18n.t("security.ip.dbip"))
     return "\n".join(lines)
 
 

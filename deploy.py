@@ -70,7 +70,7 @@ ROLLBACK = '''from pathlib import Path
 import json,sys,subprocess,shutil,os,tempfile,grp
 request=json.load(sys.stdin);backup=Path(request['backup'])
 if backup.parent!=Path('/var/backups/traffic-monitor'):raise RuntimeError('invalid backup path')
-subprocess.run(['systemctl','stop','traffic-hub.service','traffic-bot.service','traffic-agent.service','traffic-cut.path','traffic-cut.timer'],check=False,capture_output=True)
+subprocess.run(['systemctl','stop','traffic-hub.service','traffic-bot.service','traffic-agent.service','traffic-cut.path','traffic-cut.timer','traffic-ipdata.service','traffic-ipdata.timer'],check=False,capture_output=True)
 if not (backup/'code').exists():
  for p in Path('/etc/systemd/system').glob('traffic-*'):
   if not (backup/'units'/p.name).exists() and p.is_file():p.unlink()
@@ -93,6 +93,7 @@ for name in ['traffic-monitor.env','traffic-monitor-agents.json']:
 for p in (backup/'units').iterdir():shutil.copy2(p,Path('/etc/systemd/system')/p.name)
 subprocess.run(['systemctl','daemon-reload'],check=True)
 role=request['role'];units=['traffic-hub.service','traffic-bot.service','traffic-monitor.timer'] if role=='hub' else ['traffic-agent.service']
+if role=='hub' and (backup/'units'/'traffic-ipdata.timer').is_file():units.append('traffic-ipdata.timer')
 subprocess.run(['systemctl','restart']+units+['traffic-cut.path','traffic-cut.timer'],check=True)
 print(json.dumps({'rolled_back':True}))
 '''
@@ -154,7 +155,7 @@ def main():
         if not stage.startswith('/tmp/traffic-monitor.') or '/' in stage[len('/tmp/traffic-monitor.'):]:raise RuntimeError('invalid staging directory')
         archive=io.BytesIO()
         with tarfile.open(fileobj=archive,mode='w:gz') as bundle:
-            for path in sorted(ROOT.glob('*.py'))+[ROOT/'install-host.sh',ROOT/'locales',ROOT/'systemd']:
+            for path in sorted(ROOT.glob('*.py'))+[ROOT/'install-host.sh',ROOT/'locales',ROOT/'systemd',ROOT/'data']:
                 bundle.add(path,arcname=path.name,filter=lambda entry:None if '__pycache__' in entry.name else entry)
         ssh(target,'sudo -n tar -xzf - -C '+shlex.quote(stage),archive.getvalue())
         updates={key:settings[key] for key in ['TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','ADMIN_TOKEN','AGENT_TOKEN'] if settings.get(key)}

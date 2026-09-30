@@ -1,0 +1,29 @@
+[Unit]
+Description=Update local IP geography, ASN and scanner data
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trafficmon
+Group=trafficmon
+StateDirectory=traffic-monitor-ipdata
+StateDirectoryMode=0750
+WorkingDirectory=/opt/traffic-monitor
+ExecStart=/usr/bin/python3 /opt/traffic-monitor/update_ip_data.py
+UMask=0027
+Nice=15
+CPUQuota=25%
+TasksMax=8
+MemoryAccounting=yes
+MemoryHigh=32M
+MemoryMax=64M
+MemorySwapMax=0
+TimeoutStartSec=1800
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+

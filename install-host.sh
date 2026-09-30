@@ -56,7 +56,7 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" && ! -f 
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
+for required in ip_enrichment.py ip_data.py update_ip_data.py data/ip-rules.json security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
     locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer \
@@ -190,6 +190,8 @@ merged = {
     "SECURITY_PROVIDER": keep("SECURITY_PROVIDER"),
     "SECURITY_EVENT_LOG": keep("SECURITY_EVENT_LOG"),
     "SECURITY_STATUS_FILE": keep("SECURITY_STATUS_FILE"),
+    "IP_DATA_DIR": keep("IP_DATA_DIR"),
+    "IP_CONTEXT_ONLINE": keep("IP_CONTEXT_ONLINE"),
 }
 if role == "hub" and not merged["TELEGRAM_BOT_TOKEN"]:
     raise SystemExit("hub role needs TELEGRAM_BOT_TOKEN in /etc/traffic-monitor.env")
@@ -301,7 +303,7 @@ if explicit_cap or explicit_reset:
         bill["from_install"] = pushed
         util.save_json(bill_path, bill)
 
-release_files = sorted(bundle.glob("*.py")) + sorted((bundle / "locales").glob("*.json")) + sorted((bundle / "systemd").iterdir())
+release_files = sorted(bundle.glob("*.py")) + sorted((bundle / "locales").glob("*.json")) + sorted((bundle / "systemd").iterdir()) + sorted((bundle / "data").glob("*.json"))
 identity = hashlib.sha256()
 for src in release_files:
     identity.update(str(src.relative_to(bundle)).encode())
@@ -317,6 +319,7 @@ if not release.exists():
         (staging / src.name).chmod(0o644)
     shutil.copytree(bundle / "locales", staging / "locales")
     shutil.copytree(bundle / "systemd", staging / "systemd")
+    shutil.copytree(bundle / "data", staging / "data")
     (staging / "release-id").write_text(version + "\n")
     staging.chmod(0o755)
     staging.rename(release)
@@ -394,12 +397,12 @@ systemctl restart traffic-cut.timer
 systemctl start traffic-cut.service >/dev/null 2>&1 || true
 if [[ "$ROLE" == hub ]]; then
     systemctl disable --now traffic-agent.service >/dev/null 2>&1 || true
-    systemctl enable --now traffic-hub.service traffic-bot.service traffic-monitor.timer
+    systemctl enable --now traffic-hub.service traffic-bot.service traffic-monitor.timer traffic-ipdata.timer
     systemctl restart traffic-hub.service
     sleep 1
     systemctl restart traffic-bot.service
 else
-    systemctl disable --now traffic-hub.service traffic-bot.service traffic-monitor.timer >/dev/null 2>&1 || true
+    systemctl disable --now traffic-hub.service traffic-bot.service traffic-monitor.timer traffic-ipdata.timer >/dev/null 2>&1 || true
     systemctl enable --now traffic-agent.service
     systemctl restart traffic-agent.service
 fi

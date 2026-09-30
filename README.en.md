@@ -192,6 +192,21 @@ five minutes; successful dates are remembered in `daily-sent.json`.
 `python3 hub.py --daily-preview` previews without sending. For ordinary HTTPS use
 `tls_observation`, which disables REALITY differential classification.
 
+IP attribution uses independent modules: `ip_data.py` reads local range indexes,
+and `ip_enrichment.py` owns bounded background caching and verified reverse DNS.
+The Hub checks DB-IP Lite country/ASN editions daily at 04:00 Asia/Singapore;
+upstream releases are monthly. CSV imports stream into SQLite with a 1 MiB reader
+cache, validation and atomic publication. Failed updates retain the old database.
+No pip dependency is needed. Run `systemctl start traffic-ipdata.service` for the
+initial import. Data is stored in `/var/lib/traffic-monitor-ipdata/geo.sqlite3`.
+
+Classifier rules are independent JSON data (`data/ip-rules.json`, overridden by
+`rules.json` in the data directory). The updater refreshes published Censys ranges;
+scanner-domain hints require matching reverse and forward DNS. Attribution never
+reduces risk severity. Online geolocation fallback is disabled unless
+`IP_CONTEXT_ONLINE=1`. Geography and ownership are estimates, with DB-IP attribution
+links in reports; they do not identify the actual operator.
+
 ## systemd memory caps
 
 | unit | MemoryMax | Notes |

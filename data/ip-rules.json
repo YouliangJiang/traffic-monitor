@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-09-30",
+  "scanner_domains": {
+    "reposify.net": "Reposify",
+    "censys-scanner.com": "Censys",
+    "shodan.io": "Shodan",
+    "shadowserver.org": "Shadowserver"
+  },
+  "scanner_networks": [],
+  "hosting_names": ["Amazon", "Linode", "Akamai", "DigitalOcean", "Hetzner", "OVH", "Vultr", "Microsoft", "Google", "Alibaba", "Tencent", "Oracle", "Scaleway", "Cloudflare"],
+  "country_names": {
+    "zh": {"US":"美国", "CN":"中国", "HK":"中国香港", "TW":"中国台湾", "SG":"新加坡", "JP":"日本", "KR":"韩国", "GB":"英国", "DE":"德国", "FR":"法国", "NL":"荷兰", "RU":"俄罗斯", "IN":"印度", "AU":"澳大利亚", "CA":"加拿大", "BR":"巴西", "ID":"印度尼西亚", "MY":"马来西亚", "VN":"越南", "TH":"泰国", "CH":"瑞士", "SE":"瑞典", "FI":"芬兰", "PL":"波兰", "UA":"乌克兰", "TR":"土耳其", "ZA":"南非"},
+    "en": {"US":"United States", "CN":"China", "HK":"Hong Kong", "TW":"Taiwan", "SG":"Singapore", "JP":"Japan", "KR":"South Korea", "GB":"United Kingdom", "DE":"Germany", "FR":"France", "NL":"Netherlands", "RU":"Russia", "IN":"India", "AU":"Australia", "CA":"Canada", "BR":"Brazil", "ID":"Indonesia", "MY":"Malaysia", "VN":"Vietnam", "TH":"Thailand", "CH":"Switzerland", "SE":"Sweden", "FI":"Finland", "PL":"Poland", "UA":"Ukraine", "TR":"Turkey", "ZA":"South Africa"}
+  },
+  "sources": {
+    "geography_asn": "https://db-ip.com/db/lite.php",
+    "censys_ranges": "https://docs.censys.com/docs/opt-out-of-data-collection",
+    "reposify": "https://www.crowdstrike.com/en-us/press-releases/crowdstrike-to-acquire-reposify-to-bolster-visibility-and-reduce-risk-exposure-of-external-assets/",
+    "shodan": "https://help.shodan.io/",
+    "shadowserver": "https://www.shadowserver.org/what-we-do/data-collection/"
+  }
+}

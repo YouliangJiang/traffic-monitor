@@ -510,7 +510,7 @@ class Hub:
                 if not item:
                     self.stop.wait(2)
                     continue
-                event = json.loads(item["data"])
+                event = self.security_store.enrich([json.loads(item["data"])])[0]
                 report.send_telegram(
                     util.env("TELEGRAM_BOT_TOKEN"),
                     util.env("TELEGRAM_CHAT_ID"),
@@ -531,6 +531,12 @@ class Hub:
     def start_workers(self) -> None:
         self.collector = threading.Thread(target=self.local_loop, name="local-collect", daemon=True)
         self.collector.start()
+        if self.security_store.ip_context:
+            threading.Thread(target=self.security_store.ip_context.run, args=(self.stop,), name="ip-context", daemon=True).start()
+            try:
+                self.security_store.risk_report(time.time()-7*86400, time.time())
+            except Exception as exc:
+                print("IP context warmup retry: " + type(exc).__name__, flush=True)
         if security_events.enabled():
             threading.Thread(target=self.security_loop, name="security-local", daemon=True).start()
         threading.Thread(target=self.security_notify_loop, name="security-notify", daemon=True).start()
