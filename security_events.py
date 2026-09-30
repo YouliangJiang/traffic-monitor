@@ -74,6 +74,10 @@ def normalize(value):
             "exact_clienthello_hash",
             "evidence",
             "probe_source_ips",
+            "payload_class",
+            "window_ms",
+            "replay_delay_ms",
+            "syn_without_clienthello_flows",
             "detector_version",
         ]
         if key in value
@@ -86,6 +90,9 @@ def normalize(value):
         "distinct_flows",
         "session_id_variants",
         "malformed_record_count",
+        "window_ms",
+        "replay_delay_ms",
+        "syn_without_clienthello_flows",
     ]:
         if key in result and (
             type(result[key]) is not int or not 0 <= result[key] <= 10**12
@@ -101,6 +108,7 @@ def normalize(value):
         "normalized_clienthello_hash",
         "exact_clienthello_hash",
         "detector_version",
+        "payload_class",
     ]:
         if key in result and (
             not isinstance(result[key], str) or len(result[key]) > 512
@@ -116,8 +124,20 @@ def normalize(value):
             raise ValueError("invalid event evidence")
     identity = value.get("event_id")
     if identity is None:
+        # Preserve the legacy fingerprint when adding optional display fields.
+        identity_fields = {
+            key: item
+            for key, item in result.items()
+            if key
+            not in {
+                "payload_class",
+                "window_ms",
+                "replay_delay_ms",
+                "syn_without_clienthello_flows",
+            }
+        }
         identity = hashlib.sha256(
-            json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(identity_fields, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
     if not isinstance(identity, str) or not re.fullmatch("[a-f0-9]{32,64}", identity):
         raise ValueError("invalid event identity")
@@ -376,6 +396,7 @@ class EventStore:
                 "CREATE TABLE IF NOT EXISTS events(node TEXT NOT NULL,id TEXT NOT NULL,observed REAL NOT NULL,received REAL NOT NULL,kind TEXT NOT NULL,severity TEXT NOT NULL,data TEXT NOT NULL,notification TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,retry_at REAL NOT NULL DEFAULT 0,PRIMARY KEY(node,id))"
             )
             db.execute("CREATE INDEX IF NOT EXISTS events_received ON events(received)")
+            db.execute("CREATE INDEX IF NOT EXISTS events_observed ON events(observed)")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS events_notification ON events(notification,retry_at)"
             )
@@ -487,6 +508,51 @@ class EventStore:
                 (start, end),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def risk_report(self, start, end, node=""):
+        """Count the whole observation window; sample high risks before noise.
+
+        A backfilled event keeps its actual observation time, and low first-flight
+        observations never displace a high/medium event in the detail sample.
+        """
+        if not 0 < end - start <= 31 * 86400:
+            raise ValueError("invalid security window")
+        if node and not util.valid_node_name(node):
+            raise ValueError("invalid security node")
+        clause = "observed>=? AND observed<?" + (" AND node=?" if node else "")
+        params = (start, end, node) if node else (start, end)
+        with database("security-events.sqlite3") as db:
+            db.execute("BEGIN")
+            counts = db.execute(
+                "SELECT node,severity,kind,COUNT(*) AS count,MAX(observed) AS last_seen "
+                "FROM events WHERE " + clause + " GROUP BY node,severity,kind",
+                params,
+            ).fetchall()
+            hour_start = max(start, end - 3600)
+            hour_params = (hour_start, end, node) if node else (hour_start, end)
+            recent_counts = db.execute(
+                "SELECT severity,COUNT(*) AS count FROM events WHERE "
+                + clause
+                + " GROUP BY severity",
+                hour_params,
+            ).fetchall()
+            samples = db.execute(
+                "SELECT node,data FROM events WHERE "
+                + clause
+                + " AND severity IN ('high','medium') "
+                "ORDER BY CASE severity WHEN 'high' THEN 0 ELSE 1 END,observed DESC LIMIT 4",
+                params,
+            ).fetchall()
+            db.execute("COMMIT")
+        return {
+            "start": start,
+            "end": end,
+            "counts": [dict(row) for row in counts],
+            "last_hour": {row["severity"]: row["count"] for row in recent_counts},
+            "events": [
+                dict(json.loads(row["data"]), node=row["node"]) for row in samples
+            ],
+        }
 
     def pending(self):
         with database("security-events.sqlite3") as db:

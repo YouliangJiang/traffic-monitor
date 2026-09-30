@@ -652,6 +652,21 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth():
             self._send(401, {"ok": False, "error": "unauthorized"})
             return
+        if parsed.path == "/v1/security/overview":
+            query = parse_qs(parsed.query)
+            node = (query.get("node") or [""])[0]
+            try:
+                begin = float((query.get("start") or [str(time.time()-86400)])[0])
+                finish = float((query.get("end") or [str(time.time())])[0])
+                if node and node not in HUB.nodes:
+                    self._send(404, {"ok": False, "error": "unknown node"})
+                    return
+                data = HUB.security_store.risk_report(begin, finish, node)
+            except ValueError:
+                self._send(400, {"ok": False, "error": "invalid security window"})
+                return
+            self._send(200, {"ok": True, "report": data})
+            return
         if parsed.path == "/v1/security/events":
             query = parse_qs(parsed.query)
             node = (query.get("node") or [""])[0]
@@ -949,14 +964,14 @@ def daily_report(preview: bool = False) -> None:
 
     finish = datetime.now(security_events.SG).replace(hour=0, minute=0, second=0, microsecond=0)
     begin = finish - timedelta(days=1)
-    counts = util.http_json(
+    risk = util.http_json(
         "GET",
-        f"{fleet}/v1/security/summary?start={begin.timestamp()}&end={finish.timestamp()}",
+        f"{fleet}/v1/security/overview?start={begin.timestamp()}&end={finish.timestamp()}",
         util.env("ADMIN_TOKEN"),
         timeout=15,
-    )["counts"]
+    )["report"]
     text = formatters.fleet_overview(rows.get("nodes") or [], title=i18n.t("fleet.daily_title"))
-    text += "\n\n" + security_formatters.daily(rows.get("nodes") or [], counts, begin, finish)
+    text += "\n\n" + security_formatters.daily(rows.get("nodes") or [], risk, begin, finish)
     if preview:
         print(text)
         return

@@ -214,7 +214,11 @@ class SecurityTests(unittest.TestCase):
 
         def response(method, url, token, **kwargs):
             calls.append(url)
-            return {"nodes": []} if url.endswith("/v1/nodes") else {"counts": []}
+            return (
+                {"nodes": []}
+                if url.endswith("/v1/nodes")
+                else {"report": {"counts": [], "events": []}}
+            )
 
         with (
             patch.dict(
@@ -245,7 +249,9 @@ class SecurityTests(unittest.TestCase):
                 os.environ, {"TELEGRAM_BOT_TOKEN": "test", "TELEGRAM_CHAT_ID": "test"}
             ),
             patch.object(
-                util, "http_json", side_effect=[{"nodes": []}, {"counts": []}]
+                util,
+                "http_json",
+                side_effect=[{"nodes": []}, {"report": {"counts": [], "events": []}}],
             ),
             patch.object(hub.report, "send_telegram") as sender,
             patch("sys.stdout", new=io.StringIO()) as output,

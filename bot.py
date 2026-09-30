@@ -288,7 +288,18 @@ def parse_callback(data: str) -> tuple[str, list[str]]:
     if raw in {"nodes", "help"}:
         return raw, []
     if raw.startswith("security:"):
-        return "security", [raw.split(":", 1)[1]]
+        parts = raw.split(":")
+        if len(parts) in {2, 3} and (parts[1] == "all" or util.valid_node_name(parts[1])):
+            if len(parts) == 2:
+                return "security", [parts[1]]
+            if parts[2].isdigit() and int(parts[2]) in security_formatters.WINDOWS:
+                return "security", [parts[1], security_formatters.WINDOWS[int(parts[2])]]
+        return "", []
+    if raw.startswith("sd:"):
+        target = raw.split(":", 1)[1]
+        if target == "all" or util.valid_node_name(target):
+            return "security_diagnostics", [target]
+        return "", []
     if raw.startswith("se:"):
         parts = raw.split(":", 2)
         if (
@@ -834,21 +845,46 @@ def cmd_lang(args: list[str], _: dict[str, str]) -> Reply:
 
 
 def cmd_security(args: list[str], flags: dict[str, str]) -> Reply:
-    target = util.normalize_node_name(args[0]) if args else "all"
+    choices = {value: key for key, value in security_formatters.WINDOWS.items()}
+    values = list(args)
+    target = "all"
+    if values and values[0].lower() not in choices:
+        target = util.normalize_node_name(values.pop(0))
+    window = values[0].lower() if values else flags.get("window", "24h").lower()
+    if window not in choices or len(values) > 1:
+        raise ValueError(i18n.t("security.bad_window"))
+    hours = choices[window]
     rows = nodes(True) if target == "all" else [node_named(target)]
-    query = urlencode({"node": target if target != "all" else ""})
-    events = hub_call("GET", "/v1/security/events?" + query)["events"]
-    keyboard = [
+    finish = time.time()
+    query = urlencode({"node": target if target != "all" else "", "start": finish-hours*3600, "end": finish})
+    risk = hub_call("GET", "/v1/security/overview?" + query)["report"]
+    keyboard = [[
+        _btn(("✓ " if value == hours else "") + i18n.t("security.window."+str(value)), "security:"+target+":"+str(value))
+        for value in security_formatters.WINDOWS
+    ]]
+    keyboard += [
         [_btn(i18n.t("security.button") + " · " + row["name"], "security:" + row["name"])]
         for row in rows
-    ]
-    for event in events[:4]:
+    ] if target == "all" else []
+    for event in risk["events"][:3]:
         keyboard.append([_btn(
-            i18n.t("security.details") + " · " + event["node"],
+            ("🔴 " if event["severity"] == "high" else "🟠 ") + event["node"] + " · " + security_formatters.moment(event["last_seen"]),
             "se:" + event["node"] + ":" + event["event_id"][:16],
         )])
+    keyboard.append([
+        _btn(i18n.t("security.diagnostics"), "sd:"+target),
+        _btn(i18n.t("btn.refresh"), "security:"+target+":"+str(hours)),
+    ])
     keyboard.append([_btn(i18n.t("btn.back"), "home")])
-    return Reply(security_formatters.overview(rows, events), _markup(keyboard))
+    return Reply(security_formatters.overview(rows, risk), _markup(keyboard))
+
+
+def view_security_diagnostics(target: str) -> Reply:
+    rows = nodes(True) if target == "all" else [node_named(target)]
+    return Reply(security_formatters.diagnostics(rows), _markup([
+        [_btn(i18n.t("security.recent"), "security:"+target)],
+        [_btn(i18n.t("btn.refresh"), "sd:"+target)],
+    ]))
 
 
 def view_security_event(node: str, identity: str) -> Reply:
@@ -910,6 +946,8 @@ def handle_callback(data: str) -> Reply:
         return cmd_security(args, {})
     if cmd == "security_event":
         return view_security_event(args[0], args[1])
+    if cmd == "security_diagnostics":
+        return view_security_diagnostics(args[0])
     if cmd == "home":
         return view_home()
     if cmd == "nodes":

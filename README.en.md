@@ -178,10 +178,16 @@ submit only for their own node; the Hub deduplicates and retains 30 days of even
 Initial history is backfill, with no immediate notifications. High-severity delivery
 has persistent retries; an uncertain Telegram response can produce a duplicate.
 
-`/security [node|all]`, `/alerts`, and the Security button show recent events, RSS,
-packet loss, cache evictions, and stale sensors. Daily reports include security
-counts for the previous Singapore calendar day, by Hub receipt time, at **00:00
-Asia/Singapore**. Late events count on the day received. Failed reports retry every
+`/security [node|all] [1h|24h|7d]`, `/alerts`, and the Security button lead with
+the risk conclusion, node counts, occurrence times, sources, behavioral evidence,
+and recommended investigation. The default window is 24 hours. Counts cover all
+events by actual observation time; high risks appear before suspicious activity,
+and background first packets are excluded. Interrupted sensors mark the result
+incomplete. RSS and packet-loss counters are under Monitoring details.
+Daily reports summarize the previous Singapore calendar day at **00:00
+Asia/Singapore**, using actual observation time. Backfill retains its original
+time; events arriving after midnight remain available in historical windows.
+Failed reports retry every
 five minutes; successful dates are remembered in `daily-sent.json`.
 `python3 hub.py --daily-preview` previews without sending. For ordinary HTTPS use
 `tls_observation`, which disables REALITY differential classification.
