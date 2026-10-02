@@ -2,6 +2,8 @@
 """Telegram HTML text for the daily summary and anomaly alerts."""
 from __future__ import annotations
 
+import html
+import re
 from datetime import datetime
 from typing import Any
 
@@ -42,7 +44,7 @@ def _bound(text: str) -> str:
         return text
 
 
-def node_block(row: dict[str, Any]) -> str:
+def node_block(row: dict[str, Any], live: bool = False) -> str:
     name, snap, age = h(row["name"]), row.get("snapshot"), row.get("age")
     if not snap:
         return i18n.t("node.never", name=name)
@@ -52,6 +54,9 @@ def node_block(row: dict[str, Any]) -> str:
         i18n.t("node.resources", cpu=f"{snap['cpu_pct']:.0f}", mem=f"{mem_pct(snap):.0f}",
                disk=f"{disk_pct(snap):.0f}", uptime=duration(snap["uptime_sec"])),
     ]
+    if live and row["online"]:
+        # The NIC rate is only meaningful right now, so the daily summary leaves it out.
+        lines.append(i18n.t("node.rate", rx=report.fmt_rate(snap["net_rx_rate"]), tx=report.fmt_rate(snap["net_tx_rate"])))
     if not snap["traffic_ok"]:
         lines.append(i18n.t("node.traffic_error", error=h(snap["traffic_error"])))
         return "\n".join(lines)
@@ -66,13 +71,26 @@ def node_block(row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def daily(rows: list[dict[str, Any]], today: str) -> str:
-    title = i18n.t("daily.title", date=today)
+def _fleet(title: str, rows: list[dict[str, Any]], live: bool) -> str:
     if not rows:
         return f"{title}\n\n{i18n.t('daily.empty')}"
     online = sum(1 for row in rows if row["online"])
-    blocks = "\n\n".join(node_block(row) for row in rows)
+    blocks = "\n\n".join(node_block(row, live) for row in rows)
     return f"{title}\n{i18n.t('daily.summary', online=online, total=len(rows))}\n\n{blocks}"
+
+
+def daily(rows: list[dict[str, Any]], today: str) -> str:
+    return _fleet(i18n.t("daily.title", date=today), rows, False)
+
+
+def status(rows: list[dict[str, Any]], now: datetime) -> str:
+    """On-demand view (/status, install.sh status): the daily layout plus the current NIC rate."""
+    return _fleet(i18n.t("status.title", time=now.strftime("%m-%d %H:%M")), rows, True)
+
+
+def plain(text: str) -> str:
+    """Telegram HTML as terminal text."""
+    return html.unescape(re.sub(r"</?b>", "", text))
 
 
 def alert(key: str, name: str, **extra: Any) -> str:

@@ -2,12 +2,12 @@
 
 English: [README.en.md](README.en.md)
 
-每台机器采集资源和月流量，上报到一台汇总节点（hub）；hub 每天推送一次汇总到 Telegram，出现异常时即时推送。Python 3.9+ 标准库 + systemd，不需要 pip 或 Docker。
+每台机器采集资源和月流量，上报到一台汇总节点（hub）；hub 每天推送一次汇总到 Telegram，出现异常时即时推送，也可以随时在 Telegram 里发 `/status` 或在 hub 上用命令查看当前状态。Python 3.9+ 标准库 + systemd，不需要 pip 或 Docker。
 
 ## 工作方式
 
 - **agent**（每台被监控的机器）：每 20 秒采集 CPU、内存、磁盘、网卡速率和本机流量，通过 HTTPS 上报给 hub。
-- **hub**（汇总节点）：同样采集本机数据；接收各 agent 的上报；定时发每日汇总，出现异常时推送告警。hub 只调用 Telegram 的 `sendMessage`，不接收消息。
+- **hub**（汇总节点）：同样采集本机数据；接收各 agent 的上报；定时发每日汇总，出现异常时推送告警，并回答 `/status` 查询。
 
 异常推送（每种异常只在触发时推送一次，恢复时再推送一次）：
 
@@ -20,6 +20,39 @@ English: [README.en.md](README.en.md)
 | 流量统计异常 | 本机账本读写失败 | — |
 
 每日汇总默认在 hub 本机时间 09:00 推送（`DAILY_REPORT_TIME`），内容为每个节点的在线状态、CPU/内存/磁盘、昨日与今日流量、本账期用量和上限。
+
+## 随时查看当前状态
+
+内容和每日汇总相同，另外多一行网卡实时速率。数据是各节点最近一次上报的值，最多滞后约 20 秒。
+
+**在 Telegram 里**：在配置的那个会话（`TELEGRAM_CHAT_ID`）里发 `/status`。
+
+- 只有这个会话里的消息会被处理，其他会话发来的一律忽略、不回复；只有 `/status` 和 `/help` 两个只读命令。
+- hub 停机期间发的命令不会在恢复后补答（超过 2 分钟的消息直接丢弃）。
+- 为此 hub 会长轮询 Telegram 的 `getUpdates`。同一个 bot token 只能有一个程序轮询：这个 bot 如果还被别的服务使用或设置了 webhook，命令不会生效（日志里会有 `telegram commands: ...`），推送不受影响。
+- 不需要这个功能时，在 hub 的 `/etc/traffic-monitor.env` 里设 `TELEGRAM_COMMANDS=0` 并重启 `traffic-hub`，hub 就只推送、不接收。
+
+**在 hub 上**：
+
+```bash
+sudo ./install.sh status          # 在终端打印
+sudo ./install.sh status --send   # 把同样的内容立刻推一条到 Telegram
+```
+
+```
+📡 当前状态 10-02 09:34
+在线 2/2
+
+🟢 hk
+CPU 3% · 内存 41% · 磁盘 22% · 运行 12天3小时
+实时 ↓ 1.2 Mbps · ↑ 8.4 Mbps
+昨日 18.20 GB · 今日 6.41 GB
+本月 312.50 GB / 2.00 TB（15.6%）
+账期 10-01 00:00 → 11-01 00:00
+
+🔴 sg 离线 12分
+...
+```
 
 ## 安装
 
@@ -96,7 +129,7 @@ agent 装好后不会有 Telegram 消息，它会出现在下一次每日汇总�
 
 **升级 / 修改配置**：把新代码拷到机器上，重新执行 `install.sh hub|agent`，只带要改的参数，其余参数沿用 `/etc/traffic-monitor.env` 里的值。
 
-**修改告警阈值**：`OFFLINE_ALERT_SEC`、`DISK_ALERT_PCT`、`MEM_ALERT_PCT`、`HUB_BIND` 没有对应的安装参数，直接编辑 hub 上的 `/etc/traffic-monitor.env`，然后 `sudo systemctl restart traffic-hub`。重新执行 `install.sh` 时这几项会保留；手工加进去的其他变量会被丢掉。
+**修改告警阈值等**：`OFFLINE_ALERT_SEC`、`DISK_ALERT_PCT`、`MEM_ALERT_PCT`、`HUB_BIND`、`TELEGRAM_COMMANDS` 没有对应的安装参数，直接编辑 hub 上的 `/etc/traffic-monitor.env`，然后 `sudo systemctl restart traffic-hub`。重新执行 `install.sh` 时这几项会保留；手工加进去的其他变量会被丢掉。
 
 **下线某台机器**：先在那台机器上执行 `sudo ./install.sh uninstall`，再到 hub 上执行 `sudo ./install.sh forget sg`，否则 hub 会一直报它离线。
 
@@ -124,7 +157,8 @@ agent 装好后不会有 Telegram 消息，它会出现在下一次每日汇总�
 ## 安全
 
 - agent 与 hub 之间用 HTTPS 通信。hub 使用自签证书，agent 用 SHA-256 指纹固定校验，指纹不对就不会发出 token。
-- 所有 agent 共用一个 `AGENT_TOKEN`，只能用来上报。
+- 所有 agent 共用一个 `AGENT_TOKEN`，只能用来上报。查询全部节点状态的接口除了 token 还要求请求来自 hub 本机，agent 读不到其他节点的数据。
+- Telegram 命令只读，且只响应 `TELEGRAM_CHAT_ID` 这一个会话；群里的任何成员都可以发 `/status`。
 - 服务以 `trafficmon` 用户运行，不需要 root 权限。
 
 ## 文件位置

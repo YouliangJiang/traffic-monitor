@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import counters
 import formatters
 import hub
@@ -180,6 +180,52 @@ class HubTests(Base):
         hub.forget('sg')
         self.assertEqual(list(hub.Hub().nodes), ['home'])
 
+    def get_status(self, instance, peer, token='agent-key'):
+        handler = object.__new__(hub.HubHandler)
+        handler.path = '/v1/status'
+        handler.headers = {'Authorization': 'Bearer ' + token}
+        handler.client_address = (peer, 40000)
+        handler.connection = Mock(getsockname=lambda: ('10.0.0.1', 8788))
+        result = []
+        handler._send = lambda status, payload: result.append((status, payload))
+        with patch.object(hub, 'HUB', instance):
+            handler.do_GET()
+        return result[-1]
+
+    def test_status_is_local_only_and_needs_token(self):
+        instance = hub.Hub()
+        instance.put_snapshot('sg', snap())
+        self.assertEqual(self.get_status(instance, '10.0.0.9')[0], 403)  # an agent holding the token
+        self.assertEqual(self.get_status(instance, '10.0.0.1', token='wrong')[0], 401)
+        status, payload = self.get_status(instance, '10.0.0.1')
+        self.assertEqual((status, [row['name'] for row in payload['rows']]), (200, ['home', 'sg']))
+
+    def update(self, text, chat=1, age=0, update_id=7):
+        return {'update_id': update_id, 'message': {'chat': {'id': chat}, 'date': int(time.time()) - age, 'text': text}}
+
+    def test_status_command_answers_only_the_configured_chat(self):
+        instance = hub.Hub()
+        instance.put_snapshot('home', snap(today_rx=GB, net_rx_rate=125000.0))
+        for update in (self.update('/status', chat=2), self.update('/status', age=600), self.update('hello'),
+                       {'update_id': 1}, {'message': 'x'}, self.update('/forget home')):
+            instance.handle_update(update)
+        self.assertEqual(self.sent, [])
+        instance.handle_update(self.update('/status@my_bot now'))
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn('today 1.00 GB', self.sent[0])
+        self.assertIn('Now ↓ 1.0 Mbps', self.sent[0])
+        instance.handle_update(self.update('/help'))
+        self.assertIn('/status', self.sent[1])
+
+    def test_poll_advances_offset_even_when_reply_fails(self):
+        instance = hub.Hub()
+        with patch('report.get_updates', return_value=[self.update('/status', update_id=41), self.update('/status', update_id=42)]) as poll, \
+                patch('report.send_telegram', side_effect=RuntimeError('down')):
+            with self.assertRaises(RuntimeError):
+                instance.poll_commands()
+        self.assertEqual(poll.call_args[0][1], 0)
+        self.assertEqual(instance.update_offset, 42)  # 41 is dropped, 42 is fetched again
+
 
 @unittest.skipUnless(shutil.which('openssl'), 'openssl required')
 class TlsTests(Base):
@@ -199,6 +245,9 @@ class TlsTests(Base):
                 with self.assertRaises(tlsutil.HubError):
                     tlsutil.post_json(url, pin, 'wrong', {'name': 'hk', 'snapshot': snap()})
                 self.assertNotIn('hk', instance.runtime)
+                rows = tlsutil.get_json(url.replace('/v1/report', '/v1/status'), pin, 'agent-key')['rows']
+                self.assertEqual([row['name'] for row in rows], ['home', 'sg'])
+                self.assertIn('sg', formatters.plain(formatters.status(rows, NOW)))
         finally:
             server.shutdown(); server.server_close()
 
@@ -210,6 +259,17 @@ class FormatTests(Base):
         text = formatters.daily(rows, '2026-09-30')
         self.assertIn('&lt;x&gt;', text)
         self.assertIn('has not reported', text)
+
+    def test_status_text_adds_rate_and_plain_strips_markup(self):
+        rows = [{'name': 'a', 'snapshot': snap(net_tx_rate=1250.0, traffic_error='<x>', traffic_ok=False), 'online': True, 'age': 0},
+                {'name': 'b', 'snapshot': snap(), 'online': False, 'age': 600}]
+        text = formatters.status(rows, NOW)
+        self.assertEqual(text.count('Now ↓'), 1)  # not for the offline node
+        self.assertIn('↑ 10 Kbps', text)
+        self.assertNotIn('Now ↓', formatters.daily(rows, '2026-09-30'))
+        plain = formatters.plain(text)
+        self.assertNotIn('<b>', plain)
+        self.assertIn('<x>', plain)
 
     def test_parse_cap_is_decimal(self):
         self.assertEqual(util.parse_cap('2T'), 2 * 10**12)

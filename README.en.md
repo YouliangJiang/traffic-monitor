@@ -2,12 +2,12 @@
 
 中文: [README.md](README.md)
 
-Each machine collects resource usage and monthly traffic and reports to one **hub**. The hub pushes a daily summary to Telegram and pushes anomalies as they happen. Python 3.9+ stdlib + systemd. No pip, no Docker.
+Each machine collects resource usage and monthly traffic and reports to one **hub**. The hub pushes a daily summary to Telegram and pushes anomalies as they happen; the current state is available any time via `/status` in Telegram or a command on the hub. Python 3.9+ stdlib + systemd. No pip, no Docker.
 
 ## How it works
 
 - **agent** (every monitored machine): samples CPU, memory, disk, NIC rate and the local traffic ledger every 20s, and POSTs it to the hub over HTTPS.
-- **hub**: samples itself too, receives agent reports, sends the daily summary and anomaly alerts. It only calls Telegram `sendMessage`; there is no bot to talk to.
+- **hub**: samples itself too, receives agent reports, sends the daily summary and anomaly alerts, and answers `/status`.
 
 Anomalies (one message when a condition starts, one when it clears):
 
@@ -20,6 +20,39 @@ Anomalies (one message when a condition starts, one when it clears):
 | Traffic accounting failure | local ledger unreadable/unwritable | — |
 
 The daily summary goes out at 09:00 hub-local time (`DAILY_REPORT_TIME`): per node online state, CPU/memory/disk, yesterday's and today's traffic, and period usage against the cap.
+
+## Current state on demand
+
+Same content as the daily summary plus a line with the current NIC rate. Values are each node's latest report, at most about 20s old.
+
+**In Telegram**: send `/status` in the configured chat (`TELEGRAM_CHAT_ID`).
+
+- Only messages from that chat are handled; anything else is ignored without a reply. The only commands are the read-only `/status` and `/help`.
+- Commands sent while the hub was down are not answered afterwards (messages older than 2 minutes are dropped).
+- For this the hub long-polls Telegram `getUpdates`. A bot token can be polled by one program only: if the bot is used by another service or has a webhook, commands will not work (the log shows `telegram commands: ...`); pushes are unaffected.
+- To turn it off, set `TELEGRAM_COMMANDS=0` in `/etc/traffic-monitor.env` on the hub and restart `traffic-hub`; the hub then only pushes.
+
+**On the hub**:
+
+```bash
+sudo ./install.sh status          # print in the terminal
+sudo ./install.sh status --send   # push the same text to Telegram now
+```
+
+```
+📡 Status 10-02 09:34
+Online 2/2
+
+🟢 hk
+CPU 3% · mem 41% · disk 22% · up 12d 3h
+Now ↓ 1.2 Mbps · ↑ 8.4 Mbps
+Yesterday 18.20 GB · today 6.41 GB
+This period 312.50 GB / 2.00 TB (15.6%)
+Period 10-01 00:00 → 11-01 00:00
+
+🔴 sg offline for 12m
+...
+```
 
 ## Install
 
@@ -96,7 +129,7 @@ Installing an agent sends no Telegram message; it shows up in the next daily sum
 
 **Upgrade / change settings**: copy the new code to the machine and re-run `install.sh hub|agent` with only the options to change; the rest come from `/etc/traffic-monitor.env`.
 
-**Alert thresholds**: `OFFLINE_ALERT_SEC`, `DISK_ALERT_PCT`, `MEM_ALERT_PCT` and `HUB_BIND` have no install option. Edit `/etc/traffic-monitor.env` on the hub, then `sudo systemctl restart traffic-hub`. Re-running `install.sh` keeps these; any other variable added by hand is dropped.
+**Alert thresholds and similar**: `OFFLINE_ALERT_SEC`, `DISK_ALERT_PCT`, `MEM_ALERT_PCT`, `HUB_BIND` and `TELEGRAM_COMMANDS` have no install option. Edit `/etc/traffic-monitor.env` on the hub, then `sudo systemctl restart traffic-hub`. Re-running `install.sh` keeps these; any other variable added by hand is dropped.
 
 **Retire a machine**: `sudo ./install.sh uninstall` on it, then `sudo ./install.sh forget sg` on the hub (otherwise it stays "offline").
 
@@ -122,7 +155,8 @@ This is an early-warning ledger, not a provider invoice: traffic after the last 
 ## Security
 
 - Agent ↔ hub is HTTPS. The hub cert is self-signed; agents pin its SHA-256 fingerprint and never send the token to anything else.
-- One shared `AGENT_TOKEN`, which can only submit reports.
+- One shared `AGENT_TOKEN`, which can only submit reports. The endpoint that lists every node needs the token and a request from the hub machine itself, so an agent cannot read other nodes' data.
+- Telegram commands are read-only and answered only in the `TELEGRAM_CHAT_ID` chat; in a group, any member can send `/status`.
 - Services run as the unprivileged `trafficmon` user.
 
 ## Files

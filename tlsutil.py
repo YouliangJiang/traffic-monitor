@@ -12,7 +12,7 @@ import ssl
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import util
@@ -73,6 +73,16 @@ class HubError(RuntimeError):
 
 def post_json(url: str, pin: str, token: str, payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
     """POST to the hub. The certificate is checked against the pin before the token is sent."""
+    return _request("POST", url, pin, token, payload, timeout, 65536)
+
+
+def get_json(url: str, pin: str, token: str, timeout: float = 15.0) -> dict[str, Any]:
+    """GET from the hub with the same pin check; sized for a status reply covering every node."""
+    return _request("GET", url, pin, token, None, timeout, 4 * 1024 * 1024)
+
+
+def _request(method: str, url: str, pin: str, token: str, payload: Optional[dict[str, Any]],
+             timeout: float, limit: int) -> dict[str, Any]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError(f"hub URL must be https://HOST:PORT, got {url!r}")
@@ -86,14 +96,14 @@ def post_json(url: str, pin: str, token: str, payload: dict[str, Any], timeout: 
         got = hashlib.sha256(conn.sock.getpeercert(binary_form=True) or b"").hexdigest()
         if not hmac.compare_digest(got, normalize_fingerprint(pin)):
             raise PinError(f"hub certificate fingerprint mismatch: {got}")
-        body = json.dumps(payload).encode()
-        conn.request("POST", parsed.path or "/", body=body, headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Connection": "close",
-        })
+        headers = {"Authorization": f"Bearer {token}", "Connection": "close"}
+        body = None
+        if payload is not None:
+            body = json.dumps(payload).encode()
+            headers["Content-Type"] = "application/json"
+        conn.request(method, parsed.path or "/", body=body, headers=headers)
         resp = conn.getresponse()
-        raw = resp.read(65536).decode("utf-8", errors="replace")
+        raw = resp.read(limit).decode("utf-8", errors="replace")
         if resp.status != 200:
             raise HubError(resp.status, raw[:200])
         return json.loads(raw) if raw else {}

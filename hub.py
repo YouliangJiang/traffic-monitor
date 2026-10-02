@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Hub: receive agent snapshots over HTTPS, sample itself, push alerts and a daily summary."""
+"""Hub: receive agent snapshots over HTTPS, sample itself, push alerts and a daily summary,
+answer /status in the configured Telegram chat."""
 from __future__ import annotations
 
 import hmac
@@ -13,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
 import formatters
+import i18n
 import report
 import snapshot
 import util
@@ -24,6 +26,8 @@ QUOTA_MARKS = (80, 90)
 MAX_BODY = 65536
 MAX_NODES = 64
 MAX_WORKERS = 16
+POLL_SEC = 50
+COMMAND_MAX_AGE = 120
 
 
 class Hub:
@@ -41,6 +45,8 @@ class Hub:
         self.mem_limit = util.env_int("MEM_ALERT_PCT", 90)
         hour, minute, _ = util.parse_reset_time(util.env_opt("DAILY_REPORT_TIME", "09:00")).split(":")
         self.daily_at = (int(hour), int(minute))
+        self.commands = util.env_int("TELEGRAM_COMMANDS", 1) != 0
+        self.update_offset = 0
         self.started = time.time()
         self.last_good = 0.0
         self.collector: Optional[threading.Thread] = None
@@ -156,6 +162,46 @@ class Hub:
         self.alerts["daily"] = today
         util.save_json(self.alerts_path, self.alerts)
 
+    def status_text(self) -> str:
+        return formatters.status(self.view(), datetime.now(util.local_tz()))
+
+    def handle_update(self, update: dict[str, Any], now: Optional[float] = None) -> None:
+        """Answer /status from the configured chat. Everything else is ignored without a reply."""
+        message = update.get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("chat"), dict):
+            return
+        if str(message["chat"].get("id")) != self.tg_chat:
+            return
+        # Commands queued while the hub was down are stale by the time it is back.
+        sent = message.get("date")
+        if type(sent) is not int or (now or time.time()) - sent > COMMAND_MAX_AGE:
+            return
+        words = str(message.get("text") or "").split()
+        command = words[0].split("@")[0].lower() if words else ""
+        if command == "/status":
+            report.send_telegram(self.tg_token, self.tg_chat, self.status_text())
+        elif command in ("/start", "/help"):
+            report.send_telegram(self.tg_token, self.tg_chat, i18n.t("cmd.help"))
+
+    def poll_commands(self) -> None:
+        for update in report.get_updates(self.tg_token, self.update_offset, POLL_SEC):
+            if type(update.get("update_id")) is not int:
+                continue
+            # Advance first: a command whose reply fails is dropped, not answered again later.
+            self.update_offset = max(self.update_offset, update["update_id"] + 1)
+            self.handle_update(update)
+
+    def _command_loop(self) -> None:
+        delay = 0.0
+        while not self.stop.wait(delay):
+            try:
+                self.poll_commands()
+                delay = 0.0
+            except Exception as exc:
+                # Telegram unreachable, or the token is polled elsewhere: one line, then back off.
+                delay = min(300.0, max(5.0, delay * 2))
+                print(f"telegram commands: {exc}; retrying in {delay:.0f}s", flush=True)
+
     def _loop(self, interval: float, step) -> None:
         while not self.stop.is_set():
             try:
@@ -177,6 +223,8 @@ class Hub:
         self.collector = threading.Thread(target=self._loop, args=(SAMPLE_SEC, self._collect_step), name="collect", daemon=True)
         self.collector.start()
         threading.Thread(target=self._loop, args=(SAMPLE_SEC, self._notify_step), name="notify", daemon=True).start()
+        if self.commands:
+            threading.Thread(target=self._command_loop, name="commands", daemon=True).start()
 
     def healthy(self) -> bool:
         return bool(self.collector and self.collector.is_alive() and time.time() - self.last_good <= STALE_AFTER)
@@ -199,10 +247,27 @@ class HubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self) -> bool:
+        header = self.headers.get("Authorization") or ""
+        return header.startswith("Bearer ") and hmac.compare_digest(header[7:].strip().encode(), HUB.token.encode())
+
+    def _from_this_host(self) -> bool:
+        # A peer with the address the connection arrived on is this machine. The shared token
+        # alone must not let an agent read the whole fleet.
+        return self.client_address[0] == self.connection.getsockname()[0]
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz" and HUB is not None:
             ready = HUB.healthy()
             self._send(200 if ready else 503, {"ok": ready})
+            return
+        if self.path == "/v1/status" and HUB is not None:
+            if not self._from_this_host():
+                self._send(403, {"ok": False, "error": "local only"})
+            elif not self._authorized():
+                self._send(401, {"ok": False, "error": "unauthorized"})
+            else:
+                self._send(200, {"ok": True, "rows": HUB.view()})
             return
         self._send(404, {"ok": False})
 
@@ -210,8 +275,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if HUB is None or self.path != "/v1/report":
             self._send(404, {"ok": False})
             return
-        header = self.headers.get("Authorization") or ""
-        if not header.startswith("Bearer ") or not hmac.compare_digest(header[7:].strip().encode(), HUB.token.encode()):
+        if not self._authorized():
             self._send(401, {"ok": False, "error": "unauthorized"})
             return
         try:
@@ -292,9 +356,29 @@ def forget(name: str) -> None:
     print(f"forgot {name}")
 
 
-def send_test() -> None:
-    import i18n
+def status(send: bool = False) -> None:
+    """Print what the running hub knows right now, or push it to Telegram (install.sh status)."""
+    import tlsutil
 
+    bind = util.env_opt("HUB_BIND", "0.0.0.0")
+    host = "127.0.0.1" if bind == "0.0.0.0" else bind
+    url = f"https://{host}:{util.env_int('HUB_PORT', 8788)}/v1/status"
+    try:
+        rows = tlsutil.get_json(url, tlsutil.fingerprint(tlsutil.cert_paths()[0]), util.env("AGENT_TOKEN"))["rows"]
+    except OSError as exc:
+        raise SystemExit(f"cannot reach the hub at {url}: {exc}; is traffic-hub.service running?")
+    text = formatters.status(rows, datetime.now(util.local_tz()))
+    if send:
+        try:
+            report.send_telegram(util.env("TELEGRAM_BOT_TOKEN"), util.env("TELEGRAM_CHAT_ID"), text)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
+        print("status sent to telegram")
+    else:
+        print(formatters.plain(text))
+
+
+def send_test() -> None:
     report.send_telegram(util.env("TELEGRAM_BOT_TOKEN"), util.env("TELEGRAM_CHAT_ID"),
                          i18n.t("hub.test", name=report.h(util.env("NODE_NAME"))))
     print("telegram test message sent")
@@ -305,5 +389,7 @@ if __name__ == "__main__":
         send_test()
     elif sys.argv[1:2] == ["--forget"] and len(sys.argv) == 3:
         forget(util.normalize_node_name(sys.argv[2]))
+    elif sys.argv[1:] in (["--status"], ["--status", "--send"]):
+        status(send=len(sys.argv) == 3)
     else:
         serve()

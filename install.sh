@@ -7,6 +7,7 @@ usage() {
 usage:
   sudo ./install.sh hub   --name NAME [--tg-token TOKEN --tg-chat CHAT_ID] [options]
   sudo ./install.sh agent [--name NAME --hub https://HUB_HOST:8788 --token TOKEN --fingerprint HEX] [options]
+  sudo ./install.sh status [--send] # hub: print every node's current state and traffic, or push it to Telegram
   sudo ./install.sh forget NAME     # hub: drop a decommissioned node
   sudo ./install.sh uninstall       # remove units and code; keeps /etc/traffic-monitor.env and state
 
@@ -34,7 +35,7 @@ FILES="agent.py counters.py formatters.py hostinfo.py hub.py i18n.py report.py s
 ROLE=$1; shift
 case "$ROLE" in
     -h|--help) usage; exit 0 ;;
-    hub|agent|forget|uninstall) ;;
+    hub|agent|status|forget|uninstall) ;;
     *) usage; exit 2 ;;
 esac
 [[ ${EUID} -eq 0 ]] || { echo "run as root" >&2; exit 1; }
@@ -71,6 +72,13 @@ if [[ "$ROLE" == uninstall ]]; then
     rm -rf "$APP"
     systemctl daemon-reload
     echo "uninstalled; $ENV_FILE and $STATE were kept"
+    exit 0
+fi
+
+if [[ "$ROLE" == status ]]; then
+    [[ $# -eq 0 || ( $# -eq 1 && "$1" == --send ) ]] || { usage; exit 2; }
+    [[ -e "$UNITS/traffic-hub.service" ]] || { echo "status runs on the hub" >&2; exit 1; }
+    as_service python3 "$APP/hub.py" --status ${1:+"$1"}
     exit 0
 fi
 
@@ -186,7 +194,8 @@ if role == "hub":
     config["HUB_BIND"] = current.get("HUB_BIND", "0.0.0.0")
     config["HUB_PORT"] = str(int(pick("HUB_PORT", "PORT", "8788")))
     config["DAILY_REPORT_TIME"] = util.parse_reset_time(pick("DAILY_REPORT_TIME", "DAILY", "09:00"))[:5]
-    for key, default in (("OFFLINE_ALERT_SEC", "300"), ("DISK_ALERT_PCT", "90"), ("MEM_ALERT_PCT", "90")):
+    for key, default in (("OFFLINE_ALERT_SEC", "300"), ("DISK_ALERT_PCT", "90"), ("MEM_ALERT_PCT", "90"),
+                         ("TELEGRAM_COMMANDS", "1")):
         config[key] = str(int(current.get(key, default)))
     config["UI_LANG"] = pick("UI_LANG", "LANG", "zh")
     if config["UI_LANG"] not in ("zh", "en"):

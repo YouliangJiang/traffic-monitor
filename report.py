@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Telegram sendMessage and small value formatters. Stdlib only."""
+"""Telegram sendMessage/getUpdates and small value formatters. Stdlib only."""
 from __future__ import annotations
 
 import html
@@ -13,29 +13,49 @@ _tg_ctx = ssl.create_default_context()
 _CONNECT_TIMEOUT = 5.0
 
 
+def _call(token: str, method: str, payload: dict[str, Any], timeout: float) -> tuple[int, str]:
+    """One Bot API call on its own socket: (HTTP status, response text)."""
+    conn = http.client.HTTPSConnection("api.telegram.org", timeout=_CONNECT_TIMEOUT, context=_tg_ctx)
+    try:
+        conn.connect()
+        conn.sock.settimeout(timeout)
+        conn.request("POST", f"/bot{token}/{method}", body=json.dumps(payload).encode(),
+                     headers={"Content-Type": "application/json", "Connection": "close"})
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode("utf-8", errors="replace")
+    finally:
+        conn.close()
+
+
 def send_telegram(token: str, chat_id: str, text: str, timeout: float = 15.0) -> None:
     """One HTTPS call per attempt; each attempt dials and closes its own socket."""
-    body = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}).encode()
-    headers = {"Content-Type": "application/json", "Connection": "close"}
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
     error: Exception = RuntimeError("telegram send failed")
     for _attempt in range(3):
-        conn = http.client.HTTPSConnection("api.telegram.org", timeout=_CONNECT_TIMEOUT, context=_tg_ctx)
         try:
-            conn.connect()
-            conn.sock.settimeout(timeout)
-            conn.request("POST", f"/bot{token}/sendMessage", body=body, headers=headers)
-            resp = conn.getresponse()
-            raw = resp.read().decode("utf-8", errors="replace")
-            if resp.status == 200 and json.loads(raw).get("ok"):
+            status, raw = _call(token, "sendMessage", payload, timeout)
+            if status == 200 and json.loads(raw).get("ok"):
                 return
-            error = RuntimeError(f"telegram HTTP {resp.status}: {raw[:200]}")
-            if 400 <= resp.status < 500 and resp.status != 429:
+            error = RuntimeError(f"telegram HTTP {status}: {raw[:200]}")
+            if 400 <= status < 500 and status != 429:
                 break
         except (OSError, http.client.HTTPException, ValueError) as exc:
             error = exc
-        finally:
-            conn.close()
     raise RuntimeError(f"telegram send failed: {error}")
+
+
+def get_updates(token: str, offset: int, wait: int = 50) -> list[dict[str, Any]]:
+    """Long-poll for messages sent to the bot. One attempt; the caller paces retries."""
+    payload = {"offset": offset, "timeout": wait, "allowed_updates": ["message"]}
+    try:
+        status, raw = _call(token, "getUpdates", payload, wait + 10)
+        data = json.loads(raw) if status == 200 else {}
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise RuntimeError(f"telegram getUpdates failed: {exc}") from None
+    result = data.get("result") if isinstance(data, dict) and data.get("ok") else None
+    if not isinstance(result, list):
+        raise RuntimeError(f"telegram getUpdates HTTP {status}: {raw[:200]}")
+    return [update for update in result if isinstance(update, dict)]
 
 
 def h(value: Any) -> str:
