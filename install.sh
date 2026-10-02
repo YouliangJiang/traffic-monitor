@@ -5,8 +5,8 @@ set -Eeuo pipefail
 usage() {
     cat <<'EOF'
 usage:
-  sudo ./install.sh hub   --name NAME --tg-token TOKEN --tg-chat CHAT_ID [options]
-  sudo ./install.sh agent --name NAME --hub https://HUB_HOST:8788 --token TOKEN --fingerprint HEX [options]
+  sudo ./install.sh hub   --name NAME [--tg-token TOKEN --tg-chat CHAT_ID] [options]
+  sudo ./install.sh agent [--name NAME --hub https://HUB_HOST:8788 --token TOKEN --fingerprint HEX] [options]
   sudo ./install.sh forget NAME     # hub: drop a decommissioned node
   sudo ./install.sh uninstall       # remove units and code; keeps /etc/traffic-monitor.env and state
 
@@ -16,6 +16,10 @@ options (re-running without them keeps the current values):
   --iface IFACE             accounting NIC (default: default-route interface)
 hub only:
   --port 8788  --daily 09:00  --lang zh|en
+./deploy.local (copy deploy.local.example) can supply, for both roles, NODE_NAME, MONTHLY_CAP,
+BILLING_RESET (--name, --cap, --reset); on the hub TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (--tg-token,
+--tg-chat); on agents HUB_URL, AGENT_TOKEN, HUB_FINGERPRINT (--hub, --token, --fingerprint).
+An option wins over deploy.local, which wins over the current value.
 EOF
 }
 
@@ -102,20 +106,32 @@ if [[ "$ROLE" == hub ]]; then
 fi
 
 # Validate the options and write the environment file before touching anything else.
-python3 - "$SRC" "$ENV_FILE" <<'PY'
+python3 - "$SRC" "$ENV_FILE" "$SRC/deploy.local" <<'PY'
 import os, secrets, sys, tempfile
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
 import util
 
+# Keys the operator may keep in the gitignored deploy.local instead of passing them as options.
+# MONTHLY_CAP and BILLING_RESET take the same text as --cap and --reset.
+LOCAL_KEYS = ("NODE_NAME", "MONTHLY_CAP", "BILLING_RESET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+              "HUB_URL", "AGENT_TOKEN", "HUB_FINGERPRINT")
+
+
+def read_env(path):
+    values = {}
+    if path.is_file():
+        for line in path.read_text().splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip()
+    return values
+
+
 env_path = Path(sys.argv[2])
-current = {}
-if env_path.is_file():
-    for line in env_path.read_text().splitlines():
-        if "=" in line and not line.startswith("#"):
-            key, value = line.split("=", 1)
-            current[key.strip()] = value.strip()
+current = read_env(env_path)
+local = {key: value for key, value in read_env(Path(sys.argv[3])).items() if key in LOCAL_KEYS and value}
 flag = lambda name: os.environ.get("INSTALL_" + name, "")
 role = flag("ROLE")
 
@@ -129,10 +145,20 @@ def default_iface():
 
 
 def pick(key, name, default=""):
-    value = flag(name) or current.get(key) or default
+    value = flag(name) or local.get(key) or current.get(key) or default
     if not value:
-        raise SystemExit(f"missing --{name.lower().replace('_', '-')}")
+        hint = f" (or {key} in deploy.local)" if key in LOCAL_KEYS else ""
+        raise SystemExit(f"missing --{name.lower().replace('_', '-')}{hint}")
+    if not flag(name) and key in local:
+        print(f"using {key} from deploy.local")
     return value
+
+
+def given(key, name):
+    """An option or its deploy.local key; empty keeps what the env file already has."""
+    if not flag(name) and key in local:
+        print(f"using {key} from deploy.local")
+    return flag(name) or local.get(key, "")
 
 
 config = {"ROLE": role}
@@ -142,12 +168,13 @@ if not util.valid_node_name(config["NODE_NAME"]):
 config["TRAFFIC_IFACE"] = pick("TRAFFIC_IFACE", "IFACE", default_iface())
 if not Path("/sys/class/net", config["TRAFFIC_IFACE"]).exists():
     raise SystemExit(f"interface {config['TRAFFIC_IFACE']} not found")
-if flag("CAP"):
-    config["MONTHLY_CAP_BYTES"] = str(util.parse_cap(flag("CAP")) or 0)
+cap, reset = given("MONTHLY_CAP", "CAP"), given("BILLING_RESET", "RESET")
+if cap:
+    config["MONTHLY_CAP_BYTES"] = str(util.parse_cap(cap) or 0)
 else:
     config["MONTHLY_CAP_BYTES"] = current.get("MONTHLY_CAP_BYTES", "0")
-if flag("RESET"):
-    day, clock = util.parse_reset(flag("RESET"))
+if reset:
+    day, clock = util.parse_reset(reset)
     config["BILLING_RESET_DAY"], config["BILLING_RESET_TIME"] = str(day), clock
 else:
     config["BILLING_RESET_DAY"] = current.get("BILLING_RESET_DAY", "1")
@@ -217,6 +244,15 @@ Hub installed. Open inbound TCP ${HUB_PORT} on this host, then on each other mac
     --token ${AGENT_TOKEN} \\
     --fingerprint ${FINGERPRINT} \\
     --cap 2T --reset 1
+
+or put these in deploy.local on that machine and run "sudo ./install.sh agent":
+
+  NODE_NAME=NAME
+  MONTHLY_CAP=2T
+  BILLING_RESET=1
+  HUB_URL=https://THIS_HOST_ADDRESS:${HUB_PORT}
+  AGENT_TOKEN=${AGENT_TOKEN}
+  HUB_FINGERPRINT=${FINGERPRINT}
 
 EOF
 fi

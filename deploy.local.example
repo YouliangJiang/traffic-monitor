@@ -1,11 +1,22 @@
-# Copy to deploy.local (gitignored). Do not put this file in git.
-# Use SSH aliases, not public IPs, when you can.
+# Copy to deploy.local next to install.sh (gitignored) and chmod 600. Do not put the copy in git.
+# install.sh reads these when the matching option is not given.
+# Precedence: command-line option > deploy.local > current /etc/traffic-monitor.env.
+# Plain KEY=value, no quotes. Other keys are ignored.
 
-# SSH_TARGET=my-ssh-alias
-# HUB_HOST=my-ssh-alias
-# HUB_URL=https://127.0.0.1:8788
-# NODE_NAME=sg
-# TELEGRAM_BOT_TOKEN=
-# TELEGRAM_CHAT_ID=
-# AGENT_TOKEN=
-# ADMIN_TOKEN=
+# These three describe this machine: review them when copying the file to another host.
+# --name, must be unique per machine
+NODE_NAME=
+# --cap: 2T, 500G, unlimited (decimal units)
+MONTHLY_CAP=
+# --reset: 27 or 27T08:00, host local time
+BILLING_RESET=
+
+# Hub only (ignored on agents): --tg-token / --tg-chat
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# Agent only (ignored on the hub): --hub / --token / --fingerprint, as printed by the hub install.
+# The same three values go on every agent.
+HUB_URL=
+AGENT_TOKEN=
+HUB_FINGERPRINT=

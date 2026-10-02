@@ -23,17 +23,58 @@ English: [README.en.md](README.en.md)
 
 ## 安装
 
-目标机需要 root、systemd、`python3`；hub 还需要 `openssl`。把仓库拷到机器上，在仓库目录执行。
+目标机需要 root、systemd、`python3`（3.9+）；hub 还需要 `openssl`，并且能访问 `api.telegram.org`。把仓库拷到每台机器上（`git clone` 或 `scp -r`），在仓库目录执行。
+
+配置由 `install.sh` 校验后写入 `/etc/traffic-monitor.env`，不需要手工编辑这个文件；`traffic-monitor.env.example` 只是它的字段说明，不用 `cp`。
+
+**准备 Telegram 参数**（只有 hub 需要）：
+
+- bot token：在 Telegram 里找 @BotFather，`/newbot` 创建机器人后得到。
+- chat id：先给机器人发一条消息（发到群里则先把机器人拉进群），再访问 `https://api.telegram.org/bot<token>/getUpdates`，取返回里的 `chat.id`；群的 id 是负数。
+
+**`deploy.local`（可选）**：hub 和 agent 都可以把安装参数写进仓库目录下的 `deploy.local`（已被 git 忽略），就不用在命令行里带，token 也不会出现在 shell 历史里：
+
+```bash
+cp deploy.local.example deploy.local && chmod 600 deploy.local
+vi deploy.local
+```
+
+| 键 | 对应参数 | 说明 |
+|---|---|---|
+| `NODE_NAME` | `--name` | hub 和 agent 都可用；每台机器必须不同 |
+| `MONTHLY_CAP` | `--cap` | 写法同参数：`2T`、`500G`、`unlimited` |
+| `BILLING_RESET` | `--reset` | 写法同参数：`27`、`27T08:00` |
+| `TELEGRAM_BOT_TOKEN` | `--tg-token` | 仅 hub 读取 |
+| `TELEGRAM_CHAT_ID` | `--tg-chat` | 仅 hub 读取 |
+| `HUB_URL` | `--hub` | 仅 agent 读取 |
+| `AGENT_TOKEN` | `--token` | 仅 agent 读取；hub 上的 token 由安装脚本生成 |
+| `HUB_FINGERPRINT` | `--fingerprint` | 仅 agent 读取 |
+
+优先级：命令行参数 > `deploy.local` > `/etc/traffic-monitor.env` 里已有的值。文件里其他的键会被忽略。前三项描述的是本机：把这份文件拷到别的机器时要逐项核对，尤其是 `NODE_NAME`，两台 agent 用了同一个名字，hub 会把它们当成同一个节点。
+
+账期重置时刻和每日汇总时间都按各机器自己的时区计算，安装前用 `timedatectl` 确认时区。
 
 **1. 汇总节点（hub）**
 
 ```bash
+sudo ./install.sh hub
+# 没有 deploy.local 时：
 sudo ./install.sh hub --name hk --tg-token 123456:ABC... --tg-chat 987654321 --cap 2T --reset 1
 ```
 
-安装时会发送一条 Telegram 测试消息，并打印 agent 的安装命令（其中包含共享 token 和 hub 证书指纹）。在 hub 上放行入站 **TCP 8788**，尽量只允许 agent 的来源 IP 访问。
+hub 自己也是一个被监控的节点，`--cap`、`--reset` 填的是这台机器自己的流量套餐。
 
-**2. 其他机器（agent）**：复制 hub 打印出的命令，改掉 `--name`、`--hub` 地址和流量参数：
+安装时会发送一条 Telegram 测试消息，并打印 agent 的安装命令（其中包含共享 token 和 hub 证书指纹）。在 hub 上放行入站 **TCP 8788**（系统防火墙和云厂商安全组都要放行），尽量只允许 agent 的来源 IP 访问。agent 机器不需要开放任何入站端口。
+
+之后想再看一次 token 和指纹，在 hub 上不带参数重新执行 `sudo ./install.sh hub` 即可，token 和证书不会变（会再发一条测试消息并重启服务）。
+
+**2. 其他机器（agent）**：hub 安装完会同时打印一段可以直接粘进 `deploy.local` 的内容。在 agent 上建好 `deploy.local`，填上本机的 `NODE_NAME`、`MONTHLY_CAP`、`BILLING_RESET`，以及 hub 给出的 `HUB_URL`、`AGENT_TOKEN`、`HUB_FINGERPRINT`（这三项每台 agent 都一样），然后：
+
+```bash
+sudo ./install.sh agent
+```
+
+不用 `deploy.local` 时，复制 hub 打印出的命令，改掉 `--name`、`--hub` 地址和流量参数：
 
 ```bash
 sudo ./install.sh agent --name sg --hub https://HUB_IP:8788 \
@@ -41,9 +82,21 @@ sudo ./install.sh agent --name sg --hub https://HUB_IP:8788 \
   --cap 500G --reset 27T08:00
 ```
 
-安装时会先上报一次，失败会给出提示。
+安装时会先上报一次，失败会给出提示。一台机器只能是一种角色：在同一台机器上安装另一种角色，会停掉并移除原来的那个服务。
 
-**升级 / 修改配置**：重新执行 `install.sh hub|agent`，只带要改的参数，其余参数沿用 `/etc/traffic-monitor.env` 里的值。
+**3. 检查**
+
+```bash
+systemctl status traffic-hub        # agent 上是 traffic-agent
+journalctl -u traffic-hub -f        # 日志；上报或推送失败会在这里打印
+curl -k https://127.0.0.1:8788/healthz   # 仅 hub，正常返回 {"ok": true}
+```
+
+agent 装好后不会有 Telegram 消息，它会出现在下一次每日汇总里；hub 当天安装时如果已经过了汇总时间，第一条汇总在第二天发出。
+
+**升级 / 修改配置**：把新代码拷到机器上，重新执行 `install.sh hub|agent`，只带要改的参数，其余参数沿用 `/etc/traffic-monitor.env` 里的值。
+
+**修改告警阈值**：`OFFLINE_ALERT_SEC`、`DISK_ALERT_PCT`、`MEM_ALERT_PCT`、`HUB_BIND` 没有对应的安装参数，直接编辑 hub 上的 `/etc/traffic-monitor.env`，然后 `sudo systemctl restart traffic-hub`。重新执行 `install.sh` 时这几项会保留；手工加进去的其他变量会被丢掉。
 
 **下线某台机器**：先在那台机器上执行 `sudo ./install.sh uninstall`，再到 hub 上执行 `sudo ./install.sh forget sg`，否则 hub 会一直报它离线。
 
@@ -51,11 +104,13 @@ sudo ./install.sh agent --name sg --hub https://HUB_IP:8788 \
 
 | 参数 | 说明 |
 |---|---|
-| `--name` | 节点名，`[a-z][a-z0-9-]{0,31}` |
-| `--cap` | 月流量上限，十进制单位（`2T` = 2×10¹² 字节）；`unlimited` 或不填表示不限量 |
-| `--reset` | 账期重置时刻，本机时区：`27` 表示每月 27 日 00:00:00，`27T08:00` 表示 27 日 08:00；短月份自动取月末那天 |
+| `--name` | 节点名，`[a-z][a-z0-9-]{0,31}`；不填则读 `deploy.local` 的 `NODE_NAME` |
+| `--cap` | 月流量上限，十进制单位（`2T` = 2×10¹² 字节）；`unlimited` 表示不限量；不填则读 `deploy.local` 的 `MONTHLY_CAP`，都没有则不限量 |
+| `--reset` | 账期重置时刻，本机时区：`27` 表示每月 27 日 00:00:00，`27T08:00` 表示 27 日 08:00；短月份自动取月末那天；不填则读 `deploy.local` 的 `BILLING_RESET`，都没有则为 1 日 00:00:00 |
 | `--iface` | 统计哪块网卡，默认取默认路由所在的网卡 |
+| `--hub` / `--token` / `--fingerprint` | 仅 agent 可用：hub 地址 / 共享 token / hub 证书指纹；不填则读 `deploy.local` |
 | `--port` / `--daily` / `--lang` | 仅 hub 可用：监听端口 / 每日汇总时间 / 消息语言 `zh` 或 `en` |
+| `--tg-token` / `--tg-chat` | 仅 hub 可用：Telegram bot token / chat id；不填则读 `deploy.local` |
 
 ## 月流量怎么统计
 
@@ -87,3 +142,7 @@ python3 -m unittest discover -s tests -v
 bash -n install.sh
 python3 tests/benchmark_ledger.py .   # 用合成数据测试账本的内存和耗时
 ```
+
+### 旧版遗留文件
+
+仓库里还留着上一版（Telegram 机器人 + 超量断网）的文件，当前版本不安装、不使用，也已经无法运行：`bot.py`、`cut.py`、`cutctl.py`、`protocol.py`、`deploy.py`、`deploy-remote.sh`、`enroll-agent.py`、`install-host.sh`、`tests/native_nft.py`，以及 `systemd/` 下除 `traffic-hub.service`、`traffic-agent.service` 之外的 unit。安装和升级只用 `install.sh`。
