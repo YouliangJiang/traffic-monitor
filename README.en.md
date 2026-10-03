@@ -28,6 +28,7 @@ Same content as the daily summary plus a line with the current NIC rate. Values 
 **In Telegram**: send `/status` in the configured chat (`TELEGRAM_CHAT_ID`).
 
 - Only messages from that chat are handled; anything else is ignored without a reply. The only commands are the read-only `/status` and `/help`.
+- On start the hub sets the command menu (the Menu button next to the input box) with `setMyCommands`: `/status` and `/help`, shown in that chat only, and it clears global commands registered for this bot by another program. If the menu still shows old commands, reopen the chat.
 - Commands sent while the hub was down are not answered afterwards (messages older than 2 minutes are dropped).
 - For this the hub long-polls Telegram `getUpdates`. A bot token can be polled by one program only: if the bot is used by another service or has a webhook, commands will not work (the log shows `telegram commands: ...`); pushes are unaffected.
 - To turn it off, set `TELEGRAM_COMMANDS=0` in `/etc/traffic-monitor.env` on the hub and restart `traffic-hub`; the hub then only pushes.

@@ -28,6 +28,8 @@ MAX_NODES = 64
 MAX_WORKERS = 16
 POLL_SEC = 50
 COMMAND_MAX_AGE = 120
+# Shown in the Telegram menu, in this order; each needs a cmd.menu.<name> locale key.
+COMMANDS = ("status", "help")
 
 
 class Hub:
@@ -47,6 +49,7 @@ class Hub:
         self.daily_at = (int(hour), int(minute))
         self.commands = util.env_int("TELEGRAM_COMMANDS", 1) != 0
         self.update_offset = 0
+        self.menu_synced = False
         self.started = time.time()
         self.last_good = 0.0
         self.collector: Optional[threading.Thread] = None
@@ -191,9 +194,21 @@ class Hub:
             self.update_offset = max(self.update_offset, update["update_id"] + 1)
             self.handle_update(update)
 
+    def sync_menu(self) -> None:
+        """Replace whatever command menu the bot token carries (possibly from another program)
+        with ours. Telegram keeps it server side, so once per hub start is enough."""
+        report.set_commands(self.tg_token, self.tg_chat, [(name, i18n.t(f"cmd.menu.{name}")) for name in COMMANDS])
+        self.menu_synced = True
+
     def _command_loop(self) -> None:
         delay = 0.0
         while not self.stop.wait(delay):
+            if not self.menu_synced:
+                # Separate from polling: a menu failure must not stop /status from being answered.
+                try:
+                    self.sync_menu()
+                except Exception as exc:
+                    print(f"telegram menu: {exc}; retrying", flush=True)
             try:
                 self.poll_commands()
                 delay = 0.0

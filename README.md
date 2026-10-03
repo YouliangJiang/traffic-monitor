@@ -28,6 +28,7 @@ English: [README.en.md](README.en.md)
 **在 Telegram 里**：在配置的那个会话（`TELEGRAM_CHAT_ID`）里发 `/status`。
 
 - 只有这个会话里的消息会被处理，其他会话发来的一律忽略、不回复；只有 `/status` 和 `/help` 两个只读命令。
+- hub 启动时会通过 `setMyCommands` 设置输入框旁的命令菜单（Menu），只在这个会话里显示 `/status` 和 `/help`，并清除这个 bot 之前被其他程序注册的全局命令。菜单若仍显示旧命令，重开会话即可刷新。
 - hub 停机期间发的命令不会在恢复后补答（超过 2 分钟的消息直接丢弃）。
 - 为此 hub 会长轮询 Telegram 的 `getUpdates`。同一个 bot token 只能有一个程序轮询：这个 bot 如果还被别的服务使用或设置了 webhook，命令不会生效（日志里会有 `telegram commands: ...`），推送不受影响。
 - 不需要这个功能时，在 hub 的 `/etc/traffic-monitor.env` 里设 `TELEGRAM_COMMANDS=0` 并重启 `traffic-hub`，hub 就只推送、不接收。

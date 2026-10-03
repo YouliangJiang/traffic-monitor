@@ -24,6 +24,8 @@
   "alert.quota": "📈 <b>{name}</b> reached {mark}% of the monthly cap: {used} / {cap}",
   "hub.test": "✅ traffic-monitor hub <b>{name}</b> installed; Telegram delivery works.",
   "cmd.help": "Commands:\n/status current state and traffic of every node",
+  "cmd.menu.status": "Current state and traffic of every node",
+  "cmd.menu.help": "List commands",
   "dur.d": "{days}d {hours}h",
   "dur.h": "{hours}h {minutes}m",
   "dur.m": "{minutes}m"

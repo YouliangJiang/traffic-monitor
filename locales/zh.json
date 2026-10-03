@@ -24,6 +24,8 @@
   "alert.quota": "📈 <b>{name}</b> 本月流量已达 {mark}%：{used} / {cap}",
   "hub.test": "✅ traffic-monitor hub <b>{name}</b> 已安装，Telegram 推送正常。",
   "cmd.help": "可用命令：\n/status 查看各节点当前状态和流量",
+  "cmd.menu.status": "查看各节点当前状态和流量",
+  "cmd.menu.help": "命令说明",
   "dur.d": "{days}天{hours}小时",
   "dur.h": "{hours}小时{minutes}分",
   "dur.m": "{minutes}分"

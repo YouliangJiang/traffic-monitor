@@ -44,6 +44,32 @@ def send_telegram(token: str, chat_id: str, text: str, timeout: float = 15.0) ->
     raise RuntimeError(f"telegram send failed: {error}")
 
 
+def _api(token: str, method: str, payload: dict[str, Any], timeout: float = 15.0) -> None:
+    """One attempt; raises RuntimeError unless Telegram answers ok."""
+    try:
+        status, raw = _call(token, method, payload, timeout)
+        ok = status == 200 and json.loads(raw).get("ok") is True
+    except (OSError, http.client.HTTPException, ValueError, AttributeError) as exc:
+        raise RuntimeError(f"telegram {method} failed: {exc}") from None
+    if not ok:
+        raise RuntimeError(f"telegram {method} HTTP {status}: {raw[:200]}")
+
+
+# Scopes another program using this token may have filled. A narrower scope wins in the client,
+# so leftovers here would otherwise show up for anyone but the configured chat.
+_BROAD_SCOPES = ("default", "all_private_chats", "all_group_chats", "all_chat_administrators")
+
+
+def set_commands(token: str, chat_id: str, commands: list[tuple[str, str]]) -> None:
+    """Make the bot's command menu exactly `commands`, visible in `chat_id` only."""
+    for scope in _BROAD_SCOPES:
+        _api(token, "deleteMyCommands", {"scope": {"type": scope}})
+    _api(token, "setMyCommands", {
+        "commands": [{"command": name, "description": text} for name, text in commands],
+        "scope": {"type": "chat", "chat_id": chat_id},
+    })
+
+
 def get_updates(token: str, offset: int, wait: int = 50) -> list[dict[str, Any]]:
     """Long-poll for messages sent to the bot. One attempt; the caller paces retries."""
     payload = {"offset": offset, "timeout": wait, "allowed_updates": ["message"]}

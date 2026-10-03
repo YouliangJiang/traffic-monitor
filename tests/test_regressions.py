@@ -226,6 +226,31 @@ class HubTests(Base):
         self.assertEqual(poll.call_args[0][1], 0)
         self.assertEqual(instance.update_offset, 42)  # 41 is dropped, 42 is fetched again
 
+    def test_menu_replaces_leftovers_and_is_scoped_to_the_chat(self):
+        calls = []
+        with patch('report._call', side_effect=lambda token, method, payload, timeout: calls.append((method, payload)) or (200, '{"ok":true}')):
+            hub.Hub().sync_menu()
+        self.assertEqual([p['scope']['type'] for m, p in calls if m == 'deleteMyCommands'],
+                         ['default', 'all_private_chats', 'all_group_chats', 'all_chat_administrators'])
+        method, payload = calls[-1]
+        self.assertEqual((method, payload['scope']), ('setMyCommands', {'type': 'chat', 'chat_id': '1'}))
+        self.assertEqual([c['command'] for c in payload['commands']], ['status', 'help'])
+        self.assertTrue(all(c['description'] and not c['description'].startswith('cmd.') for c in payload['commands']))
+
+    def test_menu_failure_does_not_block_commands_and_is_retried(self):
+        instance = hub.Hub()
+        polls = []
+
+        def poll(*_args):
+            polls.append(1)
+            if len(polls) == 2:
+                instance.stop.set()
+            return []
+        with patch('report.set_commands', side_effect=[RuntimeError('down'), None]) as menu, \
+                patch('report.get_updates', side_effect=poll), patch('builtins.print'):
+            instance._command_loop()
+        self.assertEqual((menu.call_count, len(polls), instance.menu_synced), (2, 2, True))
+
 
 @unittest.skipUnless(shutil.which('openssl'), 'openssl required')
 class TlsTests(Base):
