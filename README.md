@@ -56,7 +56,7 @@ CPU 3% · 内存 41% · 磁盘 22% · 运行 12天3小时
 
 ## 安装
 
-目标机需要 root、systemd、`python3`（3.9+）；hub 还需要 `openssl`，并且能访问 `api.telegram.org`。把仓库拷到每台机器上（`git clone` 或 `scp -r`），在仓库目录执行。
+目标机需要 root、systemd、Python 3.9+（系统自带的 `python3` 版本不够时见下文「老系统上的 Python」）；hub 还需要 `openssl`，并且能访问 `api.telegram.org`。把仓库拷到每台机器上（`git clone` 或 `scp -r`），在仓库目录执行。
 
 配置由 `install.sh` 校验后写入 `/etc/traffic-monitor.env`，不需要手工编辑这个文件；`traffic-monitor.env.example` 只是它的字段说明，不用 `cp`。
 
@@ -144,6 +144,33 @@ agent 装好后不会有 Telegram 消息，它会出现在下一次每日汇总�
 | `--hub` / `--token` / `--fingerprint` | 仅 agent 可用：hub 地址 / 共享 token / hub 证书指纹；不填则读 `deploy.local` |
 | `--port` / `--daily` / `--lang` | 仅 hub 可用：监听端口 / 每日汇总时间 / 消息语言 `zh` 或 `en` |
 | `--tg-token` / `--tg-chat` | 仅 hub 可用：Telegram bot token / chat id；不填则读 `deploy.local` |
+
+## 老系统上的 Python
+
+需要 Python 3.9 或更新版本，且带 `ssl` 和 `sqlite3` 模块。`install.sh` 会按顺序查找 `python3`、`python3.13` … `python3.9`，以及 `/usr/local/bin` 下的同名文件，用第一个符合要求的，并把它的路径写进 systemd unit。所以只要并排装一个新版本即可，**不需要替换系统自带的 `python3`**。找不到时会列出检查过的解释器和原因。
+
+也可以明确指定：`sudo PYTHON=/usr/local/bin/python3.9 ./install.sh agent`。解释器要装在服务用户 `trafficmon` 能访问的位置（`/usr/local`、`/opt`），不要放在 `/root` 或 `/home` 下。
+
+**CentOS / RHEL 8 系**（自带 3.6）：
+
+```bash
+dnf install -y python39
+```
+
+**CentOS 7**（自带 3.6，软件源里没有 3.9）：从源码编译，装到 `/usr/local`，不影响系统的 `python3` 和 `yum`。
+
+```bash
+yum install -y gcc make openssl-devel bzip2-devel libffi-devel zlib-devel sqlite-devel xz-devel
+cd /usr/local/src
+curl -fLO https://mirrors.huaweicloud.com/python/3.9.25/Python-3.9.25.tgz   # 或 https://www.python.org/ftp/python/3.9.25/Python-3.9.25.tgz
+tar xf Python-3.9.25.tgz && cd Python-3.9.25
+./configure --prefix=/usr/local
+make -j"$(nproc)"
+make altinstall          # altinstall 只装 python3.9，不会覆盖 python3
+/usr/local/bin/python3.9 -c 'import ssl, sqlite3; print(ssl.OPENSSL_VERSION)'
+```
+
+最后一条能正常打印就说明可用，之后照常执行 `sudo ./install.sh agent`。编译完成后 `/usr/local/src/Python-3.9.25*` 可以删掉。
 
 ## 月流量怎么统计
 

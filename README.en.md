@@ -56,7 +56,7 @@ Period 10-01 00:00 → 11-01 00:00
 
 ## Install
 
-Targets need root, systemd and `python3` (3.9+); the hub also needs `openssl` and outbound access to `api.telegram.org`. Copy the repository to each machine (`git clone` or `scp -r`) and run from its directory.
+Targets need root, systemd and Python 3.9+ (see "Python on older distributions" below when the system `python3` is too old); the hub also needs `openssl` and outbound access to `api.telegram.org`. Copy the repository to each machine (`git clone` or `scp -r`) and run from its directory.
 
 `install.sh` validates the configuration and writes `/etc/traffic-monitor.env`; you never edit that file to install. `traffic-monitor.env.example` only documents its fields; do not `cp` it.
 
@@ -142,6 +142,33 @@ Installing an agent sends no Telegram message; it shows up in the next daily sum
 | `--hub` / `--token` / `--fingerprint` | agent only: hub address / shared token / hub certificate fingerprint; read from `deploy.local` when omitted |
 | `--port` / `--daily` / `--lang` | hub only: listen port / summary time / `zh` or `en` |
 | `--tg-token` / `--tg-chat` | hub only: Telegram bot token / chat id; read from `deploy.local` when omitted |
+
+## Python on older distributions
+
+Python 3.9 or newer with the `ssl` and `sqlite3` modules is required. `install.sh` looks for `python3`, `python3.13` … `python3.9`, then the same names under `/usr/local/bin`, uses the first one that qualifies and writes its path into the systemd unit. So install a newer version next to the system one; **the system `python3` does not have to be replaced**. When nothing qualifies, it lists the interpreters it checked and why each was rejected.
+
+To choose one explicitly: `sudo PYTHON=/usr/local/bin/python3.9 ./install.sh agent`. The interpreter must be somewhere the service user `trafficmon` can reach (`/usr/local`, `/opt`), not under `/root` or `/home`.
+
+**CentOS / RHEL 8 family** (ships 3.6):
+
+```bash
+dnf install -y python39
+```
+
+**CentOS 7** (ships 3.6, no 3.9 package): build from source into `/usr/local`; the system `python3` and `yum` are untouched.
+
+```bash
+yum install -y gcc make openssl-devel bzip2-devel libffi-devel zlib-devel sqlite-devel xz-devel
+cd /usr/local/src
+curl -fLO https://www.python.org/ftp/python/3.9.25/Python-3.9.25.tgz
+tar xf Python-3.9.25.tgz && cd Python-3.9.25
+./configure --prefix=/usr/local
+make -j"$(nproc)"
+make altinstall          # altinstall installs python3.9 only and leaves python3 alone
+/usr/local/bin/python3.9 -c 'import ssl, sqlite3; print(ssl.OPENSSL_VERSION)'
+```
+
+If the last command prints a version, run `sudo ./install.sh agent` as usual. `/usr/local/src/Python-3.9.25*` can be deleted afterwards.
 
 ## How monthly traffic is counted
 

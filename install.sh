@@ -40,7 +40,37 @@ case "$ROLE" in
 esac
 [[ ${EUID} -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 [[ -d /run/systemd/system ]] || { echo "systemd is required" >&2; exit 1; }
-command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
+
+# Python 3.9+ with ssl and sqlite3. PYTHON=/path/to/python picks one explicitly; otherwise the
+# first match wins. /usr/local/bin is listed by path because sudo's PATH usually leaves it out,
+# and that is where "make altinstall" puts a source build on distributions with an old python3.
+find_python() {
+    local candidate path seen=""
+    for candidate in ${PYTHON:-python3 python3.13 python3.12 python3.11 python3.10 python3.9 \
+        /usr/local/bin/python3 /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
+        /usr/local/bin/python3.11 /usr/local/bin/python3.10 /usr/local/bin/python3.9}; do
+        path=$(command -v "$candidate" 2>/dev/null) || continue
+        [[ $path == /* ]] || path=$PWD/$path
+        if ! "$path" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+            seen+="  $path: $("$path" -V 2>&1), need 3.9 or newer"$'\n'
+        elif ! "$path" -c 'import ssl, sqlite3' 2>/dev/null; then
+            seen+="  $path: built without the ssl or sqlite3 module (install openssl-devel and sqlite-devel, then rebuild)"$'\n'
+        elif [[ $path == *[!A-Za-z0-9_./+-]* ]]; then
+            seen+="  $path: path has characters a systemd unit cannot take"$'\n'
+        else
+            PY=$path
+            return 0
+        fi
+    done
+    {
+        echo "Python 3.9+ is required and no usable interpreter was found."
+        [[ -z $seen ]] || printf 'checked:\n%s' "$seen"
+        echo "Install one (README: Python on older distributions), or point at it: sudo PYTHON=/path/to/python3.9 ./install.sh ..."
+    } >&2
+    return 1
+}
+PY=
+[[ "$ROLE" == uninstall ]] || find_python || exit 1
 
 # Run a command as the service user with the service environment loaded.
 as_service() {
@@ -78,14 +108,14 @@ fi
 if [[ "$ROLE" == status ]]; then
     [[ $# -eq 0 || ( $# -eq 1 && "$1" == --send ) ]] || { usage; exit 2; }
     [[ -e "$UNITS/traffic-hub.service" ]] || { echo "status runs on the hub" >&2; exit 1; }
-    as_service python3 "$APP/hub.py" --status ${1:+"$1"}
+    as_service "$PY" "$APP/hub.py" --status ${1:+"$1"}
     exit 0
 fi
 
 if [[ "$ROLE" == forget ]]; then
     [[ $# -eq 1 ]] || { usage; exit 2; }
     systemctl stop traffic-hub.service
-    as_service python3 "$APP/hub.py" --forget "$1"
+    as_service "$PY" "$APP/hub.py" --forget "$1"
     systemctl start traffic-hub.service
     exit 0
 fi
@@ -114,7 +144,7 @@ if [[ "$ROLE" == hub ]]; then
 fi
 
 # Validate the options and write the environment file before touching anything else.
-python3 - "$SRC" "$ENV_FILE" "$SRC/deploy.local" <<'PY'
+"$PY" - "$SRC" "$ENV_FILE" "$SRC/deploy.local" <<'PY'
 import os, secrets, sys, tempfile
 from pathlib import Path
 
@@ -222,20 +252,25 @@ install -d -m 0755 "$APP" "$APP/locales"
 for file in $FILES; do install -m 0644 "$SRC/$file" "$APP/$file"; done
 install -m 0644 "$SRC"/locales/*.json "$APP/locales/"
 install -d -o trafficmon -g trafficmon -m 0750 "$STATE"
-python3 -m py_compile "$APP"/*.py
+"$PY" -m py_compile "$APP"/*.py
+# The service user must be able to run the interpreter (not one under /root or /home).
+runuser -u trafficmon -- "$PY" -c pass 2>/dev/null \
+    || { echo "user trafficmon cannot run $PY; install Python under /usr/local or /opt" >&2; exit 1; }
 
 OTHER=$([[ "$ROLE" == hub ]] && echo agent || echo hub)
 systemctl disable --now "traffic-$OTHER.service" >/dev/null 2>&1 || true
 rm -f "$UNITS/traffic-$OTHER.service"
-install -m 0644 "$SRC/systemd/traffic-$ROLE.service" "$UNITS/"
+# The unit ships with /usr/bin/python3; write the interpreter found above instead.
+sed "s|^ExecStart=/usr/bin/python3 |ExecStart=$PY |" "$SRC/systemd/traffic-$ROLE.service" > "$UNITS/traffic-$ROLE.service"
+chmod 0644 "$UNITS/traffic-$ROLE.service"
 systemctl daemon-reload
 
 if [[ "$ROLE" == hub ]]; then
-    FINGERPRINT=$(as_service python3 "$APP/tlsutil.py")
-    as_service python3 "$APP/hub.py" --test \
+    FINGERPRINT=$(as_service "$PY" "$APP/tlsutil.py")
+    as_service "$PY" "$APP/hub.py" --test \
         || echo "WARNING: Telegram test message failed; check --tg-token/--tg-chat and outbound access to api.telegram.org" >&2
 else
-    as_service python3 "$APP/agent.py" --check \
+    as_service "$PY" "$APP/agent.py" --check \
         || echo "WARNING: could not report to the hub; check --hub, --token, --fingerprint and that the hub port is reachable" >&2
 fi
 systemctl enable traffic-$ROLE.service >/dev/null
