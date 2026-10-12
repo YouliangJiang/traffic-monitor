@@ -122,7 +122,9 @@ for line in Path('/etc/traffic-monitor.env').read_text().splitlines():
   k,v=line.split('=',1);config[k]=v.strip().strip('"').strip("'")
 os.environ.update(config);sys.path.insert(0,str(code))
 owner=pwd.getpwnam('trafficmon');os.initgroups(owner.pw_name,owner.pw_gid);os.setgid(owner.pw_gid);os.setuid(owner.pw_uid)
-import report,util
+import report,util,runtime_assets
+try:assets=runtime_assets.verify_readable(code)
+except (OSError,ValueError,TypeError):assets=False
 units=(['traffic-hub.service','traffic-bot.service','traffic-ipdata.timer'] if role=='hub' else ['traffic-agent.service'])+['traffic-maintenance.timer','systemd-journald@traffic-security.service']
 active=all(subprocess.run(['systemctl','is-active','--quiet',unit]).returncode==0 for unit in units)
 ledger=Path('/var/lib/traffic-monitor/traffic.sqlite3');fresh=False
@@ -137,7 +139,7 @@ if role=='hub':
 retention=all(subprocess.check_output(['systemctl','show',unit,'--property=Result','--value'],text=True).strip()=='success' for unit in ['traffic-maintenance.service','traffic-journal-clean.service'])
 state=util.load_json(Path('/var/lib/traffic-monitor/maintenance-status.json'))
 retention=retention and state.get('retention_days')==30 and state.get('errors')=={} and time.time()-report.parse_iso_datetime(state['finished_at']).timestamp()<600
-print(json.dumps({'ok':active and fresh and api and retention,'role':role,'node':config['NODE_NAME'],'active':active,'ledger_fresh':fresh,'api_ready':api,'retention_ready':retention,'release':(code/'release-id').read_text().strip()}))
+print(json.dumps({'ok':active and fresh and api and retention and assets,'role':role,'node':config['NODE_NAME'],'active':active,'ledger_fresh':fresh,'api_ready':api,'retention_ready':retention,'runtime_assets_ready':assets,'release':(code/'release-id').read_text().strip()}))
 '''
 
 

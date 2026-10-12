@@ -61,7 +61,7 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" && ! -f 
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in maintenance.py ip_enrichment.py ip_data.py update_ip_data.py data/ip-rules.json data/journald-traffic-security.conf data/journald-traffic-security-limits.conf security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
+for required in runtime_assets.py maintenance.py ip_enrichment.py ip_data.py update_ip_data.py data/ip-rules.json data/journald-traffic-security.conf data/journald-traffic-security-limits.conf security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
     locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer \
@@ -111,6 +111,7 @@ import grp
 sys.path.insert(0, sys.argv[1])
 import tlsutil
 import util
+import runtime_assets
 
 bundle = pathlib.Path(sys.argv[1])
 role = os.environ["INSTALL_ROLE"]
@@ -326,9 +327,12 @@ if not release.exists():
     shutil.copytree(bundle / "locales", staging / "locales")
     shutil.copytree(bundle / "systemd", staging / "systemd")
     shutil.copytree(bundle / "data", staging / "data")
+    runtime_assets.normalize_permissions(staging)
     (staging / "release-id").write_text(version + "\n")
     staging.chmod(0o755)
     staging.rename(release)
+# Reusing an existing content-addressed release must also repair inherited modes.
+runtime_assets.normalize_permissions(release)
 opt = pathlib.Path("/opt/traffic-monitor")
 previous = ""
 if opt.is_symlink():
