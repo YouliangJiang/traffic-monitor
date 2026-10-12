@@ -399,6 +399,24 @@ class EventStore:
             )
             db.execute("CREATE INDEX IF NOT EXISTS events_received ON events(received)")
             db.execute("CREATE INDEX IF NOT EXISTS events_observed ON events(observed)")
+            # Window counts should not fetch the large JSON payload for every
+            # event in a node's history. Cover both node and fleet overview paths.
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS events_node_window ON events(node,observed,severity,kind)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS events_fleet_window ON events(observed,node,severity,kind)"
+            )
+            # Restrict detail candidates before sorting high risks ahead of
+            # medium events; low observations must not drive payload reads.
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS events_node_risk_window ON events(node,observed DESC) "
+                "WHERE severity IN ('high','medium')"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS events_fleet_risk_window ON events(observed DESC) "
+                "WHERE severity IN ('high','medium')"
+            )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS events_notification ON events(notification,retry_at)"
             )

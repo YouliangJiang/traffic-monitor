@@ -183,6 +183,56 @@ class SecurityReportingTests(unittest.TestCase):
                 handler.do_GET()
             self.assertEqual(result[0][0], 400)
 
+    def test_large_history_window_queries_have_bounded_work_and_keep_risk_priority(self):
+        store = self.store([
+            signal(1, "high", age=3500),
+            signal(2, "medium", age=10),
+            signal(3, "low", age=5),
+            signal(4, "high", age=5, node="agent-b"),
+        ])
+        # A node's old history and fleet-wide low noise previously forced
+        # payload-table scans on every click, even for a one-hour window.
+        with security.database("security-events.sqlite3") as db:
+            db.execute("BEGIN")
+            db.executemany(
+                "INSERT INTO events(node,id,observed,received,kind,severity,data,notification) VALUES(?,?,?,?,?,?,?,?)",
+                ((node, f"{1000+i:032x}", NOW-10*86400, NOW-10*86400,
+                  "unclassified_first_flight", "low", "{}", "summary")
+                 for node in ["agent-a", "agent-b"] for i in range(12000)),
+            )
+            db.execute("COMMIT")
+        original = security.database
+        work = []
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def bounded_database(name):
+            with original(name) as db:
+                steps = [0]
+
+                def progress():
+                    steps[0] += 1000
+                    return int(steps[0] > 40000)
+
+                db.set_progress_handler(progress, 1000)
+                try:
+                    yield db
+                finally:
+                    db.set_progress_handler(None, 0)
+                    work.append(steps[0])
+
+        with patch.object(security, "database", bounded_database):
+            node = store.risk_report(NOW-3600, NOW, "agent-a")
+            fleet = store.risk_report(NOW-3600, NOW)
+        self.assertEqual(sum(row["count"] for row in node["counts"]), 3)
+        self.assertEqual(sum(row["count"] for row in fleet["counts"]), 4)
+        self.assertEqual(node["last_hour"], {"high": 1, "medium": 1, "low": 1})
+        self.assertEqual([row["severity"] for row in node["events"]], ["high", "medium"])
+        self.assertEqual([row["severity"] for row in fleet["events"]], ["high", "high", "medium"])
+        self.assertTrue(work)
+        self.assertLessEqual(max(work), 40000)
+
     def test_extra_details_do_not_change_legacy_event_identity(self):
         base = signal(1)
         base.pop("event_id")
