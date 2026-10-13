@@ -100,8 +100,8 @@ Send the bot a message first, then set `TELEGRAM_CHAT_ID`. After that, prefer th
 | `/nodes` | Coverage list |
 | `/go name` or tap a machine | One node |
 | `/traffic` `/today` `/cpu` `/mem` `/disk` `/uptime` | Optional name or `all` |
-| `/svc name xray 443,2053` | Optional: probe those TCP ports on the node; hidden if unset |
-| `/svc name xray off` | Remove that service |
+| `/svc name nginx 80,443` | Optional: probe those TCP ports on the node; hidden if unset |
+| `/svc name nginx off` | Remove that service |
 | NIC or `/net name` | Sample current NIC occupancy for ~3s, **no generated traffic** |
 | Speed test or `/bw name [seconds]` | Download/upload via Cloudflare (public bandwidth) |
 | Latency or `/rtt name` | Ping fixed addresses in Europe, the US, China, and Southeast Asia |
@@ -117,23 +117,20 @@ Latency is a ping from that machine to Europe, the US, China, and Southeast Asia
 
 ## Optional service watches
 
-This is optional. **No button appears until you configure it.** Xray, Nginx, or anything else is just a name plus TCP ports probed on that host.
+This is optional. **No button appears until you configure it.** Nginx or anything else is just a name plus TCP ports probed on that host.
 
 Configure from Telegram (stored in the hub `inventory.json`, not git):
 
 ```
-/svc NODE xray 443,2053
 /svc NODE nginx 80,443 proc=nginx
-/svc NODE xray off
+/svc NODE nginx off
 /svc NODE off
 ```
 
 - `NODE` is the node name. Service names are yours: lowercase letters, digits, hyphens.
-- Ports are arbitrary, comma-separated. Probes use `127.0.0.1` / `::1` on the target, so localhost-only inbounds work.
+- Ports are arbitrary, comma-separated. Probes use `127.0.0.1` / `::1` on the target, so localhost-only services work.
 - `proc=` is optional (RSS). Defaults to the service name.
 - At most 4 services per node. Add another with a second `/svc` line.
-
-`/xray` still works: it opens the service named `xray` if present, otherwise the first configured service.
 
 
 User-facing strings live in `locales/zh.json` and `locales/en.json`. Code only formats those keys.
@@ -184,8 +181,7 @@ Asia/Singapore**, using actual observation time. Backfill retains its original
 time; events arriving after midnight remain available in historical windows.
 Failed reports retry every
 five minutes; successful dates are remembered in `daily-sent.json`.
-`python3 hub.py --daily-preview` previews without sending. For ordinary HTTPS use
-`tls_observation`, which disables REALITY differential classification.
+`python3 hub.py --daily-preview` previews without sending.
 
 IP attribution uses independent modules: `ip_data.py` reads local range indexes,
 and `ip_enrichment.py` owns bounded background caching and verified reverse DNS.

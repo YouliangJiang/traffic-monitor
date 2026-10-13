@@ -100,8 +100,8 @@ cp deploy.local.example deploy.local
 | `/nodes` | 覆盖列表 |
 | `/go 名字` 或点机器名 | 一台详情 |
 | `/traffic` `/today` `/cpu` `/mem` `/disk` `/uptime` | 可加名字或 `all` |
-| `/svc 名字 xray 443,2053` | 可选：在该机探测这些 TCP 端口；不配则详情里不显示 |
-| `/svc 名字 xray off` | 去掉该服务 |
+| `/svc 名字 nginx 80,443` | 可选：在该机探测这些 TCP 端口；不配则详情里不显示 |
+| `/svc 名字 nginx off` | 去掉该服务 |
 | `/security [名字或 all] [1h\|24h\|7d]` / `/alerts` /「安全」 | 近期高危探测信号、可疑异常、发生时间与证据 |
 | 「网速」或 `/net 名字` | 读网卡当前吞吐约 3 秒，**不打流** |
 | 「测速」或 `/bw 名字 [秒]` | 对 Cloudflare 下载/上传，测公网带宽 |
@@ -118,23 +118,20 @@ cp deploy.local.example deploy.local
 
 ## 可选服务探活
 
-这是扩展项，**不配就不显示按钮**。Xray、Nginx 或别的进程都可以，只是「在那台机器上探测一组 TCP 端口是否在听」。
+这是扩展项，**不配就不显示按钮**。Nginx 或别的进程都可以，只是「在那台机器上探测一组 TCP 端口是否在听」。
 
 用 Telegram 配（写进 hub 的 `inventory.json`，不进 git）：
 
 ```
-/svc NODE xray 443,2053
 /svc NODE nginx 80,443 proc=nginx
-/svc NODE xray off
+/svc NODE nginx off
 /svc NODE off
 ```
 
 - `NODE` 是节点名；服务名自定，小写字母、数字、短横线。
-- 端口任意，逗号分隔。探测的是目标机本机 `127.0.0.1` / `::1`，所以只绑在 localhost 的 inbound 也能盯。
+- 端口任意，逗号分隔。探测的是目标机本机 `127.0.0.1` / `::1`，所以只监听 localhost 的服务也能盯。
 - `proc=` 可选，用来读进程 RSS；省略则默认等于服务名。
 - 每台最多 4 个服务。再加一种服务再发一条 `/svc` 即可。
-
-`/xray` 仍可用：若该机配过名为 `xray` 的服务就看它，否则看第一个已配服务。
 
 
 ## 安全扩展
@@ -154,7 +151,7 @@ Hub 用 `security-events.sqlite3` 按节点与事件 ID 去重，保存 30 天�
 日报仍由同一 bot 于每天 **00:00 Asia/Singapore** 发送，汇总前一个新加坡自然日
 实际发生的信号。回填保留原发生时间；午夜后才收到的前一天事件可在历史窗口查询。
 `python3 hub.py --daily-preview` 只预览，不发送。失败日报每 5 分钟重试，已成功日期
-写入 `daily-sent.json`。普通 HTTPS 节点使用 `tls_observation`，禁用 REALITY 差分归因。
+写入 `daily-sent.json`。
 
 来源归属由独立 `ip_data.py`（本地数据）和 `ip_enrichment.py`（后台缓存／DNS）处理。
 Hub 的 `traffic-ipdata.timer` 每天新加坡时间 04:00 检查 DB-IP Lite 国家与 ASN 库，
