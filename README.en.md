@@ -155,7 +155,7 @@ See `traffic-monitor.env.example`. Do not commit a filled-in copy.
 | `BILLING_RESET_DAY` | Reset day in the host timezone (1–31) |
 | `BILLING_RESET_TIME` | Local `HH[:MM[:SS]]` that day; omitted fields are 0 |
 | `MONTHLY_CAP_BYTES` | Cap in bytes; `0` means unlimited and no cutoff |
-| `SECURITY_PROVIDER` | `xray_honeypot` enables local passive security ingestion |
+| `SECURITY_PROVIDER` | Local security event source; leave empty to disable ingestion |
 | `SECURITY_EVENT_LOG` / `SECURITY_STATUS_FILE` | Local JSONL and atomic sensor status paths |
 | `HUB_BIND` / `HUB_PORT` | Hub listen address |
 | `HUB_URL` | Bot to local hub, usually `https://127.0.0.1:8788` |
@@ -165,11 +165,6 @@ See `traffic-monitor.env.example`. Do not commit a filled-in copy.
 | `UI_LANG` | Default bot language, `zh` or `en`. Telegram buttons override this in `ui.json` |
 
 ## Passive security integration
-
-Install XrayHoneypot 0.4+ on each node and set `SECURITY_PROVIDER=xray_honeypot`.
-Disable its direct Telegram sender. The installer grants `trafficmon` read access
-through the sensor group; restart the Hub/Agent afterwards. Default paths are
-`/var/log/xray-honeypot/events.jsonl` and `status.json` (0750 directory, 0640 files).
 
 An independent worker persists JSONL cursors and up to 4096 outgoing events in
 SQLite, stops advancing when full, and retries until the Hub acknowledges event

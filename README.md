@@ -137,13 +137,7 @@ cp deploy.local.example deploy.local
 `/xray` 仍可用：若该机配过名为 `xray` 的服务就看它，否则看第一个已配服务。
 
 
-## XrayHoneypot 安全扩展
-
-在每台机器安装 XrayHoneypot 0.4+，关闭其直接 Telegram 发送，在监控环境文件中
-设置 `SECURITY_PROVIDER=xray_honeypot`。安装器会把 `trafficmon` 加入日志读取组，
-重启本机 Hub/Agent 以获得组权限。事件/状态路径默认分别为
-`/var/log/xray-honeypot/events.jsonl` 与 `status.json`，目录 0750、文件 0640。
-部署时也可使用 `python3 deploy.py HOST --security-provider xray_honeypot`。
+## 安全扩展
 
 独立采集线程将 JSONL 游标和待上报事件持久化在 `security-outbox.sqlite3`，
 Hub 用 `security-events.sqlite3` 按节点与事件 ID 去重，保存 30 天。
@@ -178,7 +172,7 @@ Hub 的 `traffic-ipdata.timer` 每天新加坡时间 04:00 检查 DB-IP Lite 国
 SQLite 回收达到 8 MiB 且占数据库 20% 的空闲页时，会在磁盘空间足够的情况下压缩数据库。
 流量计费账本仍保留原有 400 天历史策略。
 
-本项目与 XrayHoneypot 的运行日志使用独立 `traffic-security` journal namespace，
+本项目的运行日志使用独立 `traffic-security` journal namespace，
 最长保留 30 天、单文件每天或到 8 MiB 轮转、每台总量上限 256 MiB；繁忙时容量限制可能提前淘汰旧运行日志。
 每日清理会强制轮转并回收超过 30 天的 journal，配置只作用于此 namespace。
 配置路径为 `/etc/systemd/journald@traffic-security.conf`，要求 systemd 249+。
@@ -214,7 +208,7 @@ sudo cat /var/lib/traffic-monitor/maintenance-status.json
 | `BILLING_RESET_DAY` | 本机时区的月重置日（1–31） |
 | `BILLING_RESET_TIME` | 当天本机时:分:秒，缺省为 0 |
 | `MONTHLY_CAP_BYTES` | 额度字节数；`0` 表示不限额，也不会断流 |
-| `SECURITY_PROVIDER` | `xray_honeypot` 启用安全扩展；留空关闭本机事件读取 |
+| `SECURITY_PROVIDER` | 配置本机安全事件来源；留空关闭本机事件读取 |
 | `SECURITY_EVENT_LOG` / `SECURITY_STATUS_FILE` | 本机 JSONL 和原子状态快照路径 |
 | `HUB_BIND` / `HUB_PORT` | Hub 监听 |
 | `HUB_URL` | Bot 连本机 hub，一般 `https://127.0.0.1:8788` |
