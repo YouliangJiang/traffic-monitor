@@ -97,7 +97,10 @@ def sources(event, limit=3):
             line += " · " + report.h(ip_context(details[value]))
         parts.append(line)
     text = "\n".join(parts)
-    if len(values) > limit:
+    observed = max(len(values), event.get("distinct_source_ips_observed", 0))
+    if observed > len(values):
+        text += i18n.t("security.source_observed", count=observed)
+    elif len(values) > limit:
         text += i18n.t("security.source_more", count=len(values))
     return text
 
@@ -142,6 +145,21 @@ def notification(node, event):
         "\n" + i18n.t("security.why"),
     ]
     lines.extend("• " + report.h(label) for label in evidence(event))
+    if event.get("event") == "reality_replay_differential_probe":
+        observed = event.get("response_differential_observed")
+        if type(observed) is bool:
+            key = "security.response.unconfirmed"
+            if observed:
+                key = "security.response.confirmed" if event.get("response_observation_window_ms", 0) > 0 else "security.response.legacy"
+            lines.append(i18n.t(key))
+        if event.get("response_evidence_incomplete"):
+            lines.append(i18n.t("security.response.incomplete"))
+        if event.get("response_capture_gap_observed"):
+            lines.append(i18n.t("security.response.capture_gap"))
+        if event.get("response_detail_write_failed"):
+            lines.append(i18n.t("security.response.detail_failed"))
+        elif event.get("response_detail_retained"):
+            lines.append(i18n.t("security.response.detail_retained"))
     details = event.get("source_info") or {}
     for ip in list(dict.fromkeys(event.get("probe_source_ips") or []))[:2]:
         info = details.get(ip) or {}
@@ -343,12 +361,33 @@ def diagnostics(rows):
                 mode=mode,
                 memory=report.fmt_bytes(status.get("rss_bytes", 0)),
                 packets=stats.get("Packets", 0),
-                drops=status.get("capture_dropped", 0),
+                drops=status.get("capture_dropped", 0)
+                if status.get("capture_stats_available") is True
+                else i18n.t("security.capture_unknown"),
                 evictions=stats.get("FlowEvictions", 0),
                 overflows=stats.get("BufferOverflows", 0),
                 pending=status.get("pending", 0),
             )
         )
+        limits = status.get("limits") or {}
+        if limits:
+            lines.append(i18n.t(
+                "security.sensor.capacity", flows=stats.get("TrackedFlows", 0),
+                max_flows=limits.get("max_tracked_flows", "?"),
+                history=stats.get("ReplayHistoryEntries", 0),
+                max_history=limits.get("max_replay_entries", "?"),
+                hours=round(limits.get("replay_window_seconds", 0) / 3600, 1),
+                evictions=stats.get("ReplayHistoryEvictions", 0),
+            ))
+        if "ProbeResponseCaptureGaps" in stats:
+            lines.append(i18n.t(
+                "security.sensor.responses", gaps=stats.get("ProbeResponseCaptureGaps", 0),
+                omitted=stats.get("ProbeResponseRecordDrops", 0),
+                failures=stats.get("ProbeResponseDetailWriteFailures", 0),
+            ))
+        if "monitored_server_names" in status:
+            names = status["monitored_server_names"]
+            lines.append(i18n.t("security.sensor.scope", names=report.h(", ".join(names)[:500]) if names else i18n.t("security.sensor.all_sni")))
     return "\n".join(lines)
 
 

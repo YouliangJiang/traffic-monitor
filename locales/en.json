@@ -286,5 +286,18 @@
   "security.ip.unverified": "Forward DNS not confirmed",
   "security.ip.isp": "Network operator: {name}",
   "security.ip.note": "Location and ownership are estimates from IP databases and DNS, not confirmed operator identity.",
-  "security.ip.dbip": "<a href=\"https://db-ip.com\">IP country/ASN data: DB-IP Lite</a>"
+  "security.ip.dbip": "<a href=\"https://db-ip.com\">IP country/ASN data: DB-IP Lite</a>",
+  "security.source_observed": " ({count} observed sources; list truncated)",
+  "security.response.confirmed": "Paired response differences were observed in usable samples.",
+  "security.response.unconfirmed": "Current samples do not confirm a paired response difference.",
+  "security.response.incomplete": "Evidence is incomplete or abridged; absence of differences is not established.",
+  "security.response.capture_gap": "Some observation windows have capture gaps or unavailable capture statistics.",
+  "security.response.detail_failed": "Detailed evidence could not be written; the main alert was retained.",
+  "security.response.detail_retained": "Additional paired evidence was retained in the device logs.",
+  "security.capture_unknown": "statistics unavailable",
+  "security.sensor.capacity": "Tracked flows {flows}/{max_flows} · replay history {history}/{max_history} ({hours}h configured; capacity can shorten retention) · history evictions {evictions}",
+  "security.sensor.responses": "Since start: response capture gaps {gaps} · omitted records {omitted} · detail write failures {failures}",
+  "security.sensor.scope": "Monitored SNI: {names}",
+  "security.sensor.all_sni": "all",
+  "security.response.legacy": "The older record reports a response difference without matched-probe evidence."
 }

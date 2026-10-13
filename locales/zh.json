@@ -286,5 +286,18 @@
   "security.ip.unverified": "未通过正向校验",
   "security.ip.isp": "网络运营方：{name}",
   "security.ip.note": "位置及归属来自 IP 数据库与 DNS，属于推测，不能确认实际操作者。",
-  "security.ip.dbip": "<a href=\"https://db-ip.com\">IP 国家／ASN 数据：DB-IP Lite</a>"
+  "security.ip.dbip": "<a href=\"https://db-ip.com\">IP 国家／ASN 数据：DB-IP Lite</a>",
+  "security.source_observed": "（共观察到 {count} 个来源，列表已截断）",
+  "security.response.confirmed": "已在可用样本中观察到配对响应差异。",
+  "security.response.unconfirmed": "当前样本未确认配对响应差异。",
+  "security.response.incomplete": "证据有缺失或省略，不能据此认定没有差异。",
+  "security.response.capture_gap": "部分观察窗口存在抓包缺失或统计不可用。",
+  "security.response.detail_failed": "详细证据写入失败，主告警已保留。",
+  "security.response.detail_retained": "设备日志保留了更多配对证据。",
+  "security.capture_unknown": "统计不可用",
+  "security.sensor.capacity": "跟踪连接 {flows}/{max_flows} · 重放历史 {history}/{max_history}（配置 {hours} 小时，容量可能提前淘汰）· 历史累计淘汰 {evictions}",
+  "security.sensor.responses": "本次运行累计：响应抓包缺口 {gaps} · 记录省略 {omitted} · 详细证据写入失败 {failures}",
+  "security.sensor.scope": "监测 SNI：{names}",
+  "security.sensor.all_sni": "全部",
+  "security.response.legacy": "旧版记录包含响应差异信号，但缺少按探针配对的证据。"
 }

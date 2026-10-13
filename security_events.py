@@ -27,6 +27,16 @@ KINDS = {
     "tcp_syn_without_clienthello_burst",
 }
 SG = timezone(timedelta(hours=8), "Asia/Singapore")
+EVIDENCE_FLAGS = (
+    "response_differential_observed", "response_evidence_incomplete",
+    "response_capture_gap_observed", "response_detail_retained",
+    "response_detail_write_failed", "source_ips_truncated",
+)
+EVIDENCE_METRICS = (
+    "response_observation_window_ms", "response_samples_omitted",
+    "response_comparison_groups_omitted", "distinct_source_ips_observed",
+)
+SENSOR_LIMITS = {"max_tracked_flows", "max_replay_entries", "replay_window_seconds"}
 
 
 def enabled():
@@ -83,6 +93,10 @@ def normalize(value):
         ]
         if key in value
     }
+    result.update({key: value[key] for key in EVIDENCE_FLAGS + EVIDENCE_METRICS if key in value})
+    for key in EVIDENCE_FLAGS:
+        if key in result and type(result[key]) is not bool:
+            raise ValueError("invalid evidence quality flag")
     timestamp(result.get("last_seen"))
     if "first_seen" in result:
         timestamp(result["first_seen"])
@@ -94,7 +108,7 @@ def normalize(value):
         "window_ms",
         "replay_delay_ms",
         "syn_without_clienthello_flows",
-    ]:
+    ] + list(EVIDENCE_METRICS):
         if key in result and (
             type(result[key]) is not int or not 0 <= result[key] <= 10**12
         ):
@@ -135,7 +149,7 @@ def normalize(value):
                 "window_ms",
                 "replay_delay_ms",
                 "syn_without_clienthello_flows",
-            }
+            } | set(EVIDENCE_FLAGS) | set(EVIDENCE_METRICS)
         }
         identity = hashlib.sha256(
             json.dumps(identity_fields, sort_keys=True, separators=(",", ":")).encode()
@@ -366,6 +380,12 @@ class EventReader:
             "ReplayHistoryEvictions",
             "AnomalySourceEvictions",
             "AnomalySampleDrops",
+            "ReplayHistoryEntries",
+            "ProbeResponseSampleDrops",
+            "ProbeResponseRecordDrops",
+            "ProbeResponseDetailEvents",
+            "ProbeResponseDetailWriteFailures",
+            "ProbeResponseCaptureGaps",
         ]
         status["stats"] = {
             key: stats[key]
@@ -380,6 +400,15 @@ class EventReader:
         status["rss_bytes"] = (
             raw.get("rss_bytes", 0) if type(raw.get("rss_bytes", 0)) is int else 0
         )
+        if type(raw.get("capture_stats_available")) is bool:
+            status["capture_stats_available"] = raw["capture_stats_available"]
+        names = raw.get("monitored_server_names")
+        if isinstance(names, list) and len(names) <= 32 and all(isinstance(x, str) and len(x) <= 253 for x in names):
+            status["monitored_server_names"] = names
+        limits = raw.get("limits")
+        if isinstance(limits, dict):
+            status["limits"] = {key: value for key, value in limits.items()
+                                if key in SENSOR_LIMITS and type(value) is int and 0 <= value <= 10**12}
         with database("security-outbox.sqlite3") as db:
             status["pending"] = db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
             status["reader_counters"] = {
@@ -455,7 +484,7 @@ class EventStore:
             raise ValueError("event batch too large")
         if not isinstance(status, dict) or len(json.dumps(status).encode()) > 8192:
             raise ValueError("invalid sensor status")
-        for key in ["available", "running"]:
+        for key in ["available", "running", "capture_stats_available"]:
             if key in status and type(status[key]) is not bool:
                 raise ValueError("invalid sensor state")
         for key in ["capture_dropped", "rss_bytes", "pending"]:
@@ -463,6 +492,14 @@ class EventStore:
                 type(status[key]) is not int or not 0 <= status[key] <= 10**12
             ):
                 raise ValueError("invalid sensor counter")
+        limits = status.get("limits", {})
+        if (not isinstance(limits, dict) or not set(limits).issubset(SENSOR_LIMITS)
+                or any(type(v) is not int or not 0 <= v <= 10**12 for v in limits.values())):
+            raise ValueError("invalid sensor limits")
+        names = status.get("monitored_server_names", [])
+        if (not isinstance(names, list) or len(names) > 32
+                or any(not isinstance(x, str) or len(x) > 253 for x in names)):
+            raise ValueError("invalid sensor scope")
         stats = status.get("stats") or {}
         if (
             not isinstance(stats, dict)
