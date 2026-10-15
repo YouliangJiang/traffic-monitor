@@ -61,7 +61,7 @@ if [[ "$ROLE" == agent && -z "$HUB_URL_FLAG" && -z "${FLEET_HUB_URL:-}" && ! -f 
 fi
 
 bundle_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for required in runtime_assets.py maintenance.py ip_enrichment.py ip_data.py update_ip_data.py data/ip-rules.json data/journald-traffic-security.conf data/journald-traffic-security-limits.conf security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
+for required in runtime_assets.py maintenance.py ip_enrichment.py ip_data.py update_ip_data.py data/ip-rules.json data/journald-traffic-security.conf data/journald-traffic-security-limits.conf data/xray-guard.logrotate security_events.py security_formatters.py protocol.py enroll-agent.py report.py bot.py hub.py agent.py hostinfo.py util.py snapshot.py formatters.py counters.py tlsutil.py i18n.py cut.py cutctl.py \
     locales/zh.json locales/en.json \
     systemd/traffic-hub.service systemd/traffic-bot.service systemd/traffic-agent.service \
     systemd/traffic-monitor.service systemd/traffic-monitor.timer \
@@ -358,6 +358,9 @@ for src in (bundle / "systemd").iterdir():
 for name, destination in [
     ("journald-traffic-security.conf", pathlib.Path("/etc/systemd/journald@traffic-security.conf")),
     ("journald-traffic-security-limits.conf", pathlib.Path("/etc/systemd/system/systemd-journald@traffic-security.service.d/limits.conf")),
+    # Fleet-wide log retention for the optional xray-guard actuator; missingok
+    # in the config covers nodes where xray-guard is not installed.
+    ("xray-guard.logrotate", pathlib.Path("/etc/logrotate.d/xray-guard")),
 ]:
     destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     if destination.is_symlink() or destination.parent.is_symlink():
@@ -409,7 +412,8 @@ if command -v restorecon >/dev/null 2>&1; then
         /etc/systemd/system/traffic-*.timer \
         /etc/systemd/system/traffic-*.path \
         /etc/systemd/journald@traffic-security.conf \
-        /etc/systemd/system/systemd-journald@traffic-security.service.d >/dev/null || true
+        /etc/systemd/system/systemd-journald@traffic-security.service.d \
+        /etc/logrotate.d/xray-guard >/dev/null || true
 fi
 
 systemctl daemon-reload
