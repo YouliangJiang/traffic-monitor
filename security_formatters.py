@@ -12,7 +12,15 @@ SIGNAL_KINDS = {
     "tls_clienthello_delayed_replay": "delayed",
     "non_tls_connection_burst": "non_tls",
     "tcp_syn_without_clienthello_burst": "syn",
+    "distributed_syn_without_clienthello_burst": "distributed",
+    "tls_unexpected_sni": "sni",
     "unclassified_first_flight": "background",
+}
+OUTCOMES = {
+    "handshake_then_idle", "handshake_then_client_rst", "handshake_then_client_fin",
+    "handshake_then_server_rst", "handshake_then_server_fin", "synack_without_client_ack",
+    "syn_without_server_synack", "syn_then_client_rst", "syn_then_client_fin",
+    "syn_then_server_rst", "syn_then_server_fin", "tracking_evicted",
 }
 EVIDENCE_KEYS = {
     "exact_clienthello_replay": "replay",
@@ -25,6 +33,8 @@ EVIDENCE_KEYS = {
     "exact_tls13_clienthello_reobserved_beyond_short_window": "delayed",
     "repeated_non_tls_connections_on_monitored_tls_entry": "non_tls",
     "many_distinct_syn_connections_without_clienthello_after_grace": "syn",
+    "many_sources_open_connections_without_clienthello": "distributed",
+    "clienthello_sni_outside_configured_reality_names": "sni",
     "bounded_first_flight_without_parsed_clienthello": "background",
 }
 
@@ -128,6 +138,49 @@ def signal_facts(event):
     )
 
 
+def ranked(counts, limit):
+    items = [(label, count) for label, count in (counts or {}).items() if type(count) is int]
+    return sorted(items, key=lambda item: (-item[1], item[0]))[:limit]
+
+
+def connection_lines(event):
+    lines = []
+    kind = event.get("event")
+    if kind == "distributed_syn_without_clienthello_burst":
+        ended = "campaign_ended" in (event.get("evidence") or [])
+        lines.append(i18n.t("security.campaign." + ("ended" if ended else "active")))
+        if not ended and "window_connections" in event:
+            lines.append(i18n.t(
+                "security.campaign.window", connections=event["window_connections"],
+                sources=event.get("window_sources", 0)))
+    outcomes = ranked(event.get("connection_outcomes"), 3)
+    if outcomes:
+        items = [
+            i18n.t("security.outcome." + label if label in OUTCOMES else "security.outcome.other")
+            + " " + str(count)
+            for label, count in outcomes
+        ]
+        lines.append(i18n.t("security.outcomes", items=" · ".join(items)))
+    fingerprints = [item for item in ranked(event.get("syn_fingerprints"), 2) if item[0] != "other"]
+    if fingerprints:
+        ttls = ", ".join(report.h(label[:8]) for label, _ in ranked(event.get("syn_ttl_values"), 3) if label != "other")
+        lines.append(i18n.t(
+            "security.fingerprint", value=report.h(fingerprints[0][0][:80]),
+            count=fingerprints[0][1], ttls=ttls or "-"))
+    names = [item for item in event.get("sni_observations") or [] if isinstance(item, dict)]
+    if names:
+        items = [
+            i18n.t("security.sni.item", name=report.h(str(item.get("sni", ""))[:80]),
+                   hellos=item.get("hellos", 0), sources=item.get("sources", 0))
+            for item in names[:5]
+        ]
+        lines.append("SNI: " + " · ".join(items))
+        omitted = len(names) - 5 + event.get("sni_names_omitted", 0)
+        if omitted > 0:
+            lines.append(i18n.t("security.sni.omitted", count=omitted))
+    return lines
+
+
 def notification(node, event):
     severity = event["severity"]
     glyph = {"high": "🔴", "medium": "🟠", "low": "⚪"}[severity]
@@ -145,6 +198,7 @@ def notification(node, event):
         "\n" + i18n.t("security.why"),
     ]
     lines.extend("• " + report.h(label) for label in evidence(event))
+    lines.extend(connection_lines(event))
     if event.get("event") == "reality_replay_differential_probe":
         observed = event.get("response_differential_observed")
         if type(observed) is bool:
@@ -384,6 +438,15 @@ def diagnostics(rows):
                 "security.sensor.responses", gaps=stats.get("ProbeResponseCaptureGaps", 0),
                 omitted=stats.get("ProbeResponseRecordDrops", 0),
                 failures=stats.get("ProbeResponseDetailWriteFailures", 0),
+            ))
+        if "EmptyConnectionsFinalized" in stats:
+            lines.append(i18n.t(
+                "security.sensor.observer", midstream=stats.get("MidstreamPacketsIgnored", 0),
+                empty=stats.get("EmptyConnectionsFinalized", 0),
+                evicted=stats.get("EmptyConnectionEvictions", 0),
+                campaigns=stats.get("DistributedSYNCampaigns", 0),
+                active=stats.get("ActiveDistributedSYNCampaigns", 0),
+                sni=stats.get("UnexpectedSNIHellos", 0),
             ))
         if "monitored_server_names" in status:
             names = status["monitored_server_names"]

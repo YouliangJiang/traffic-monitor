@@ -25,6 +25,8 @@ KINDS = {
     "unclassified_first_flight",
     "non_tls_connection_burst",
     "tcp_syn_without_clienthello_burst",
+    "distributed_syn_without_clienthello_burst",
+    "tls_unexpected_sni",
 }
 SG = timezone(timedelta(hours=8), "Asia/Singapore")
 EVIDENCE_FLAGS = (
@@ -35,7 +37,11 @@ EVIDENCE_FLAGS = (
 EVIDENCE_METRICS = (
     "response_observation_window_ms", "response_samples_omitted",
     "response_comparison_groups_omitted", "distinct_source_ips_observed",
+    "window_connections", "window_sources", "sni_names_omitted",
 )
+# Bounded label -> count summaries of connections that sent no payload.
+COUNT_MAPS = ("connection_outcomes", "syn_fingerprints", "syn_ttl_values")
+SNI_FIELDS = ("hellos", "sources", "tls13_hellos")
 SENSOR_LIMITS = {"max_tracked_flows", "max_replay_entries", "replay_window_seconds"}
 
 
@@ -97,6 +103,36 @@ def normalize(value):
     for key in EVIDENCE_FLAGS:
         if key in result and type(result[key]) is not bool:
             raise ValueError("invalid evidence quality flag")
+    for key in COUNT_MAPS:
+        if key not in value:
+            continue
+        counts = value[key]
+        if (
+            not isinstance(counts, dict)
+            or len(counts) > 16
+            or any(
+                not isinstance(label, str) or not 0 < len(label) <= 128
+                or type(count) is not int or not 0 <= count <= 10**12
+                for label, count in counts.items()
+            )
+        ):
+            raise ValueError("invalid event count summary")
+        result[key] = counts
+    if "sni_observations" in value:
+        names = value["sni_observations"]
+        if (
+            not isinstance(names, list)
+            or len(names) > 16
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"sni", *SNI_FIELDS}
+                or not isinstance(item["sni"], str) or not 0 < len(item["sni"]) <= 253
+                or any(type(item[field]) is not int or not 0 <= item[field] <= 10**12 for field in SNI_FIELDS)
+                for item in names
+            )
+        ):
+            raise ValueError("invalid SNI summary")
+        result["sni_observations"] = names
     timestamp(result.get("last_seen"))
     if "first_seen" in result:
         timestamp(result["first_seen"])
@@ -149,7 +185,8 @@ def normalize(value):
                 "window_ms",
                 "replay_delay_ms",
                 "syn_without_clienthello_flows",
-            } | set(EVIDENCE_FLAGS) | set(EVIDENCE_METRICS)
+                "sni_observations",
+            } | set(EVIDENCE_FLAGS) | set(EVIDENCE_METRICS) | set(COUNT_MAPS)
         }
         identity = hashlib.sha256(
             json.dumps(identity_fields, sort_keys=True, separators=(",", ":")).encode()
@@ -386,6 +423,12 @@ class EventReader:
             "ProbeResponseDetailEvents",
             "ProbeResponseDetailWriteFailures",
             "ProbeResponseCaptureGaps",
+            "MidstreamPacketsIgnored",
+            "EmptyConnectionsFinalized",
+            "EmptyConnectionEvictions",
+            "DistributedSYNCampaigns",
+            "ActiveDistributedSYNCampaigns",
+            "UnexpectedSNIHellos",
         ]
         status["stats"] = {
             key: stats[key]

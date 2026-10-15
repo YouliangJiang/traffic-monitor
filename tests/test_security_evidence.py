@@ -87,6 +87,87 @@ class SecurityEvidenceTests(unittest.TestCase):
             self.assertIn("previous.example", text)
             self.assertNotIn("security.sensor.", text)
 
+    def campaign(self, ended=False):
+        return dict(
+            event("c" * 32, "medium"), event="distributed_syn_without_clienthello_burst",
+            evidence=["many_sources_open_connections_without_clienthello",
+                      "campaign_ended" if ended else "campaign_active"],
+            distinct_flows=48210, syn_without_clienthello_flows=47990,
+            window_connections=912, window_sources=163, distinct_source_ips_observed=611,
+            source_ips_truncated=True, probe_source_ips=["198.51.100.%d" % i for i in range(16)],
+            connection_outcomes={"handshake_then_server_fin": 30111, "handshake_then_client_rst": 9000,
+                                 "synack_without_client_ack": 8000, "future_outcome": 3},
+            syn_fingerprints={"ttl128/win64240/mss1440/ws8/MNWNNS": 40000, "other": 900},
+            syn_ttl_values={"113": 30000, "49": 9000},
+            connection_samples=[{"source_ip": "198.51.100.1", "outcome": "handshake_then_server_fin"}],
+        )
+
+    def test_campaign_and_sni_summaries_survive_reader_store_and_both_languages(self):
+        sni = dict(event("d" * 32, "low"), event="tls_unexpected_sni", confidence_kind="observation_only",
+                   evidence=["clienthello_sni_outside_configured_reality_names"], distinct_flows=9,
+                   sni_observations=[{"sni": "lookalike-cover.example", "hellos": 7, "sources": 2, "tls13_hellos": 7},
+                                     {"sni": "<b>x</b>", "hellos": 2, "sources": 1, "tls13_hellos": 0}],
+                   sni_names_omitted=3)
+        (self.root / "events.jsonl").write_text(json.dumps(self.campaign()) + "\n" + json.dumps(sni) + "\n")
+        reader = security.EventReader(self.root / "events.jsonl", self.root / "status.json")
+        reader.scan()
+        store = security.EventStore()
+        store.ingest("local", reader.batch(), {})
+        stored = store.detail("local", "c" * 32)
+        for key in ["connection_outcomes", "syn_fingerprints", "syn_ttl_values", "window_connections", "window_sources"]:
+            self.assertEqual(stored[key], self.campaign()[key], key)
+        self.assertNotIn("connection_samples", stored)
+        stored_sni = store.detail("local", "d" * 32)
+        self.assertEqual(stored_sni["sni_observations"], sni["sni_observations"])
+        for code in ["zh", "en"]:
+            i18n.set_lang(code)
+            text = formatting.notification("local", stored)
+            self.assertIn(i18n.t("security.behavior.distributed"), text)
+            self.assertIn(i18n.t("security.campaign.active"), text)
+            self.assertIn(i18n.t("security.outcome.handshake_then_server_fin") + " 30111", text)
+            self.assertIn("ttl128/win64240/mss1440/ws8/MNWNNS", text)
+            self.assertIn("611", text)
+            self.assertIn("912", text)
+            text = formatting.notification("local", stored_sni)
+            self.assertIn(i18n.t("security.behavior.sni"), text)
+            self.assertIn("lookalike-cover.example", text)
+            self.assertIn("&lt;b&gt;x&lt;/b&gt;", text)
+            self.assertNotIn("<b>x</b>", text)
+            for rendered in [text, formatting.notification("local", security.normalize(self.campaign(True)))]:
+                self.assertNotIn("security.", rendered)
+            self.assertIn(i18n.t("security.campaign.ended"),
+                          formatting.notification("local", security.normalize(self.campaign(True))))
+
+    def test_summary_shapes_are_validated(self):
+        bad = [
+            {"connection_outcomes": {"x": "1"}},
+            {"connection_outcomes": {str(i): 1 for i in range(17)}},
+            {"syn_fingerprints": ["ttl64"]},
+            {"syn_ttl_values": {"": 1}},
+            {"sni_observations": [{"sni": "a.example", "hellos": 1, "sources": 1}]},
+            {"sni_observations": [{"sni": "a.example", "hellos": True, "sources": 1, "tls13_hellos": 0}]},
+            {"sni_observations": [{"sni": "", "hellos": 1, "sources": 1, "tls13_hellos": 0}]},
+            {"window_connections": -1},
+        ]
+        for extra in bad:
+            with self.assertRaises(ValueError, msg=str(extra)):
+                security.normalize(dict(self.campaign(), **extra))
+
+    def test_observer_counters_reach_diagnostics(self):
+        stats = {"Packets": 10, "MidstreamPacketsIgnored": 52311, "EmptyConnectionsFinalized": 48001,
+                 "EmptyConnectionEvictions": 17, "DistributedSYNCampaigns": 2,
+                 "ActiveDistributedSYNCampaigns": 1, "UnexpectedSNIHellos": 77}
+        raw = {"running": True, "updated_at": "2026-10-15T00:00:00Z", "stats": stats}
+        (self.root / "status.json").write_text(json.dumps(raw))
+        status = security.EventReader(self.root / "events.jsonl", self.root / "status.json").status()
+        self.assertEqual(status["stats"], stats)
+        for code in ["zh", "en"]:
+            i18n.set_lang(code)
+            text = formatting.diagnostics([{"name": "local", "security": status}])
+            for value in ["52311", "48001", "17", "77"]:
+                self.assertIn(value, text)
+            self.assertNotIn("security.sensor.", text)
+
     def test_old_response_flags_do_not_claim_matched_probe_evidence(self):
         value = dict(event(), response_differential_observed=True)
         for code in ["zh", "en"]:
