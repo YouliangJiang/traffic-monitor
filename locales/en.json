@@ -324,5 +324,6 @@
   "security.fingerprint": "Main TCP fingerprint: {value} ({count}) · common TTLs: {ttls}",
   "security.sni.item": "{name} ×{hellos} (sources: {sources})",
   "security.sni.omitted": "{count} more names not listed",
-  "security.sensor.observer": "Since start: mid-stream packets ignored {midstream} · empty connections closed {empty} (evicted {evicted}) · distributed empty-connection campaigns {campaigns} ({active} active) · unexpected-SNI handshakes {sni}"
+  "security.sensor.observer": "Since start: mid-stream packets ignored {midstream} · empty connections closed {empty} (evicted {evicted}) · distributed empty-connection campaigns {campaigns} ({active} active) · unexpected-SNI handshakes {sni}",
+  "security.campaign.escalated": "Sustained for about {minutes} min from {sources} sources; escalated to high once for this campaign."
 }

@@ -138,6 +138,24 @@ class SecurityEvidenceTests(unittest.TestCase):
             self.assertIn(i18n.t("security.campaign.ended"),
                           formatting.notification("local", security.normalize(self.campaign(True))))
 
+    def test_escalated_campaign_notifies_once_with_reason(self):
+        escalated = dict(self.campaign(), severity="high", window_ms=720000,
+                         evidence=["many_sources_open_connections_without_clienthello", "campaign_active",
+                                   "sustained_campaign_escalated"])
+        update = dict(self.campaign(), event_id="e" * 32)
+        store = security.EventStore()
+        store.ingest("local", [security.normalize(escalated), security.normalize(update)], {})
+        pending = store.pending()
+        self.assertEqual(pending["id"], "c" * 32)
+        store.notified("local", pending["id"], True)
+        self.assertIsNone(store.pending())
+        for code in ["zh", "en"]:
+            i18n.set_lang(code)
+            text = formatting.notification("local", security.normalize(escalated))
+            self.assertIn(i18n.t("security.campaign.escalated", minutes=12, sources=611), text)
+            self.assertIn(i18n.t("security.signal.high"), text)
+            self.assertNotIn("security.", text)
+
     def test_summary_shapes_are_validated(self):
         bad = [
             {"connection_outcomes": {"x": "1"}},

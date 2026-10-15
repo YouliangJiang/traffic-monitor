@@ -149,6 +149,10 @@ def connection_lines(event):
     if kind == "distributed_syn_without_clienthello_burst":
         ended = "campaign_ended" in (event.get("evidence") or [])
         lines.append(i18n.t("security.campaign." + ("ended" if ended else "active")))
+        if "sustained_campaign_escalated" in (event.get("evidence") or []):
+            lines.append(i18n.t(
+                "security.campaign.escalated", minutes=max(1, round(duration(event) / 60)),
+                sources=max(event.get("distinct_source_ips_observed", 0), len(event.get("probe_source_ips") or []))))
         if not ended and "window_connections" in event:
             lines.append(i18n.t(
                 "security.campaign.window", connections=event["window_connections"],

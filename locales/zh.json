@@ -324,5 +324,6 @@
   "security.fingerprint": "主要 TCP 指纹：{value}（{count} 次）· 常见 TTL：{ttls}",
   "security.sni.item": "{name} ×{hellos}（{sources} 个来源）",
   "security.sni.omitted": "另有 {count} 个名称未列出",
-  "security.sensor.observer": "本次运行：忽略连接中途报文 {midstream} · 空连接结案 {empty}（容量淘汰 {evicted}）· 分布式空连接活动 {campaigns}（进行中 {active}）· 非预期 SNI 握手 {sni}"
+  "security.sensor.observer": "本次运行：忽略连接中途报文 {midstream} · 空连接结案 {empty}（容量淘汰 {evicted}）· 分布式空连接活动 {campaigns}（进行中 {active}）· 非预期 SNI 握手 {sni}",
+  "security.campaign.escalated": "已持续约 {minutes} 分钟、来自 {sources} 个来源，升级为高危；本次活动只推送这一次。"
 }
