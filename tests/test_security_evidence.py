@@ -186,6 +186,90 @@ class SecurityEvidenceTests(unittest.TestCase):
                 self.assertIn(value, text)
             self.assertNotIn("security.sensor.", text)
 
+    def attribution_events(self):
+        relay = dict(event("1" * 32, "medium"), event="tls_unexpected_sni", confidence_kind="heuristic_score",
+                     evidence=["clienthello_sni_outside_configured_reality_names", "third_party_traffic_relayed_to_reality_target"],
+                     distinct_flows=3, relayed_client_bytes=1_200_000, relayed_server_bytes=88_000_000,
+                     sni_observations=[{"sni": "node.example", "hellos": 3, "sources": 2, "tls13_hellos": 3,
+                                        "client_bytes": 1_200_000, "server_bytes": 88_000_000},
+                                       {"sni": "scan.example", "hellos": 1, "sources": 1, "tls13_hellos": 1}])
+        persistent = dict(event("2" * 32, "medium"), event="tls_unexpected_sni_persistent_source",
+                          first_seen="2026-09-29T08:00:00Z", window_ms=86_400_000, windows_observed=288,
+                          evidence=["same_source_repeats_unexpected_sni_across_windows"], distinct_flows=2016,
+                          probe_source_ips=["188.253.112.225"],
+                          sni_observations=[{"sni": "www.cloudflare-cn.com", "hellos": 2016, "sources": 1, "tls13_hellos": 2016}])
+        unauth = dict(event("3" * 32, "medium"), event="reality_sni_unauthenticated",
+                      evidence=["clienthello_uses_reality_server_name", "source_not_authenticated_by_xray"],
+                      distinct_flows=4, distinct_source_ips_observed=3,
+                      sni_observations=[{"sni": "www.cloudflare.com", "hellos": 4, "sources": 3, "tls13_hellos": 4}])
+        interference = dict(event("4" * 32, "medium"), event="client_connection_interference",
+                            evidence=["known_client_connections_without_clienthello"], distinct_flows=103,
+                            syn_without_clienthello_flows=103, probe_source_ips=["120.229.67.54"],
+                            connection_outcomes={"handshake_then_idle": 12})
+        return relay, persistent, unauth, interference
+
+    def test_attribution_and_relay_events_survive_reader_store_and_both_languages(self):
+        values = self.attribution_events()
+        (self.root / "events.jsonl").write_text("".join(json.dumps(value) + "\n" for value in values))
+        reader = security.EventReader(self.root / "events.jsonl", self.root / "status.json")
+        reader.scan()
+        store = security.EventStore()
+        store.ingest("local", reader.batch(), {})
+        stored = [store.detail("local", value["event_id"]) for value in values]
+        for value, kept in zip(values, stored):
+            for key in ["event", "sni_observations", "relayed_client_bytes", "relayed_server_bytes", "windows_observed"]:
+                self.assertEqual(kept.get(key), value.get(key), key)
+        relay, persistent, unauth, interference = stored
+        for code in ["zh", "en"]:
+            i18n.set_lang(code)
+            text = formatting.notification("local", relay)
+            self.assertIn(i18n.t("security.evidence.relay"), text)
+            self.assertIn(i18n.t("security.relay", up="1.20 MB", down="88.00 MB"), text)
+            self.assertIn(i18n.t("security.sni.item_bytes", name="node.example", hellos=3, sources=2, bytes="89.20 MB"), text)
+            self.assertIn(i18n.t("security.sni.item", name="scan.example", hellos=1, sources=1), text)
+            text = formatting.notification("local", persistent)
+            self.assertIn(i18n.t("security.behavior.persistent"), text)
+            self.assertIn(i18n.t("security.persistent.windows", windows=288, hours=24.0), text)
+            self.assertIn("www.cloudflare-cn.com", text)
+            self.assertIn(i18n.t("security.behavior.unauth"), formatting.notification("local", unauth))
+            text = formatting.notification("local", interference)
+            self.assertIn(i18n.t("security.behavior.interference"), text)
+            self.assertIn(i18n.t("security.interference.hint"), text)
+            for value in stored:
+                self.assertNotIn("security.", formatting.notification("local", value))
+
+    def test_relay_shapes_are_validated(self):
+        relay = self.attribution_events()[0]
+        item = relay["sni_observations"][0]
+        for extra in [
+            {"relayed_server_bytes": -1},
+            {"relayed_client_bytes": True},
+            {"relayed_server_bytes": 10**16},
+            {"windows_observed": "288"},
+            {"sni_observations": [dict(item, server_bytes="1")]},
+            {"sni_observations": [dict(item, unknown=1)]},
+        ]:
+            with self.assertRaises(ValueError, msg=str(extra)):
+                security.normalize(dict(relay, **extra))
+
+    def test_client_attribution_reaches_diagnostics(self):
+        stats = {"Packets": 10, "KnownClients": 3, "UnauthenticatedRealityHellos": 41,
+                 "KnownClientSignalsSuppressed": 192, "PersistentSNISources": 7}
+        raw = {"running": True, "updated_at": "2026-10-16T00:00:00Z", "stats": stats,
+               "client_attribution": {"enabled": True, "available": False, "known_clients": 3,
+                                      "accepted_lines": 9, "error": "open /opt/xray/data/access.log: permission denied"}}
+        (self.root / "status.json").write_text(json.dumps(raw))
+        status = security.EventReader(self.root / "events.jsonl", self.root / "status.json").status()
+        self.assertEqual(status["stats"], stats)
+        self.assertEqual(status["client_attribution"]["available"], False)
+        for code in ["zh", "en"]:
+            i18n.set_lang(code)
+            text = formatting.diagnostics([{"name": "local", "security": status}])
+            self.assertIn(i18n.t("security.sensor.clients_unavailable"), text)
+            for value in ["41", "192"]:
+                self.assertIn(value, text)
+            self.assertNotIn("security.sensor.", text)
+
     def test_old_response_flags_do_not_claim_matched_probe_evidence(self):
         value = dict(event(), response_differential_observed=True)
         for code in ["zh", "en"]:

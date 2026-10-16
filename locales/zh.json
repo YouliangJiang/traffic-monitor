@@ -325,5 +325,19 @@
   "security.sni.item": "{name} ×{hellos}（{sources} 个来源）",
   "security.sni.omitted": "另有 {count} 个名称未列出",
   "security.sensor.observer": "本次运行：忽略连接中途报文 {midstream} · 空连接结案 {empty}（容量淘汰 {evicted}）· 分布式空连接活动 {campaigns}（进行中 {active}）· 非预期 SNI 握手 {sni}",
-  "security.campaign.escalated": "已持续约 {minutes} 分钟、来自 {sources} 个来源，升级为高危；本次活动只推送这一次。"
+  "security.campaign.escalated": "已持续约 {minutes} 分钟、来自 {sources} 个来源，升级为高危；本次活动只推送这一次。",
+  "security.behavior.unauth": "未认证来源使用 REALITY 域名握手",
+  "security.behavior.interference": "已知客户端的加密握手没有到达服务器",
+  "security.behavior.persistent": "同一来源长期用非预期 SNI 握手",
+  "security.evidence.unauth": "握手使用本机 REALITY 域名，但来源从未通过 Xray 认证",
+  "security.evidence.interference": "近期认证过的客户端建立 TCP 后，ClientHello 始终没有到达",
+  "security.evidence.persistent": "同一来源在多个统计窗口反复出现",
+  "security.evidence.relay": "第三方流量经本机转发到伪装目标",
+  "security.relay": "经本机转发：上行 {up} · 下行 {down}",
+  "security.sni.item_bytes": "{name} ×{hellos}（{sources} 个来源，转发 {bytes}）",
+  "security.persistent.windows": "出现在 {windows} 个统计窗口，跨度约 {hours} 小时",
+  "security.interference.hint": "该来源是近期通过认证的你的客户端：可能是线路干扰或客户端网络故障，不是它在探测。",
+  "security.sensor.clients": "已知客户端识别：{state} · 已知客户端 {known} · 未认证 REALITY 握手 {unauth} · 已忽略自身信号 {suppressed} · 跟踪中的持续来源 {persistent}",
+  "security.sensor.clients_available": "正常",
+  "security.sensor.clients_unavailable": "访问日志不可读"
 }
