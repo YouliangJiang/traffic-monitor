@@ -27,6 +27,9 @@ KINDS = {
     "tcp_syn_without_clienthello_burst",
     "distributed_syn_without_clienthello_burst",
     "tls_unexpected_sni",
+    "tls_unexpected_sni_persistent_source",
+    "reality_sni_unauthenticated",
+    "client_connection_interference",
 }
 SG = timezone(timedelta(hours=8), "Asia/Singapore")
 EVIDENCE_FLAGS = (
@@ -37,11 +40,15 @@ EVIDENCE_FLAGS = (
 EVIDENCE_METRICS = (
     "response_observation_window_ms", "response_samples_omitted",
     "response_comparison_groups_omitted", "distinct_source_ips_observed",
-    "window_connections", "window_sources", "sni_names_omitted",
+    "window_connections", "window_sources", "sni_names_omitted", "windows_observed",
 )
+# Payload relayed to the REALITY target for unexpected names; larger bound than counts.
+BYTE_METRICS = ("relayed_client_bytes", "relayed_server_bytes")
+MAX_BYTES = 10**15
 # Bounded label -> count summaries of connections that sent no payload.
 COUNT_MAPS = ("connection_outcomes", "syn_fingerprints", "syn_ttl_values")
 SNI_FIELDS = ("hellos", "sources", "tls13_hellos")
+SNI_BYTE_FIELDS = ("client_bytes", "server_bytes")
 SENSOR_LIMITS = {"max_tracked_flows", "max_replay_entries", "replay_window_seconds"}
 
 
@@ -99,10 +106,13 @@ def normalize(value):
         ]
         if key in value
     }
-    result.update({key: value[key] for key in EVIDENCE_FLAGS + EVIDENCE_METRICS if key in value})
+    result.update({key: value[key] for key in EVIDENCE_FLAGS + EVIDENCE_METRICS + BYTE_METRICS if key in value})
     for key in EVIDENCE_FLAGS:
         if key in result and type(result[key]) is not bool:
             raise ValueError("invalid evidence quality flag")
+    for key in BYTE_METRICS:
+        if key in result and (type(result[key]) is not int or not 0 <= result[key] <= MAX_BYTES):
+            raise ValueError("invalid relayed byte count")
     for key in COUNT_MAPS:
         if key not in value:
             continue
@@ -125,9 +135,11 @@ def normalize(value):
             or len(names) > 16
             or any(
                 not isinstance(item, dict)
-                or set(item) != {"sni", *SNI_FIELDS}
+                or not {"sni", *SNI_FIELDS} <= set(item) <= {"sni", *SNI_FIELDS, *SNI_BYTE_FIELDS}
                 or not isinstance(item["sni"], str) or not 0 < len(item["sni"]) <= 253
                 or any(type(item[field]) is not int or not 0 <= item[field] <= 10**12 for field in SNI_FIELDS)
+                or any(type(item[field]) is not int or not 0 <= item[field] <= MAX_BYTES
+                       for field in SNI_BYTE_FIELDS if field in item)
                 for item in names
             )
         ):
@@ -186,7 +198,7 @@ def normalize(value):
                 "replay_delay_ms",
                 "syn_without_clienthello_flows",
                 "sni_observations",
-            } | set(EVIDENCE_FLAGS) | set(EVIDENCE_METRICS) | set(COUNT_MAPS)
+            } | set(EVIDENCE_FLAGS) | set(EVIDENCE_METRICS) | set(BYTE_METRICS) | set(COUNT_MAPS)
         }
         identity = hashlib.sha256(
             json.dumps(identity_fields, sort_keys=True, separators=(",", ":")).encode()
@@ -429,6 +441,11 @@ class EventReader:
             "DistributedSYNCampaigns",
             "ActiveDistributedSYNCampaigns",
             "UnexpectedSNIHellos",
+            "KnownClients",
+            "UnauthenticatedRealityHellos",
+            "RealityDecisionDrops",
+            "KnownClientSignalsSuppressed",
+            "PersistentSNISources",
         ]
         status["stats"] = {
             key: stats[key]
@@ -452,6 +469,15 @@ class EventReader:
         if isinstance(limits, dict):
             status["limits"] = {key: value for key, value in limits.items()
                                 if key in SENSOR_LIMITS and type(value) is int and 0 <= value <= 10**12}
+        clients = raw.get("client_attribution")
+        if isinstance(clients, dict) and type(clients.get("available")) is bool:
+            status["client_attribution"] = {
+                "available": clients["available"],
+                "known_clients": clients["known_clients"]
+                if type(clients.get("known_clients")) is int and clients["known_clients"] >= 0 else 0,
+            }
+            if isinstance(clients.get("error"), str) and clients["error"]:
+                status["client_attribution"]["error"] = clients["error"][:200]
         with database("security-outbox.sqlite3") as db:
             status["pending"] = db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
             status["reader_counters"] = {

@@ -15,6 +15,9 @@ SIGNAL_KINDS = {
     "distributed_syn_without_clienthello_burst": "distributed",
     "tls_unexpected_sni": "sni",
     "unclassified_first_flight": "background",
+    "tls_unexpected_sni_persistent_source": "persistent",
+    "reality_sni_unauthenticated": "unauth",
+    "client_connection_interference": "interference",
 }
 OUTCOMES = {
     "handshake_then_idle", "handshake_then_client_rst", "handshake_then_client_fin",
@@ -36,6 +39,10 @@ EVIDENCE_KEYS = {
     "many_sources_open_connections_without_clienthello": "distributed",
     "clienthello_sni_outside_configured_reality_names": "sni",
     "bounded_first_flight_without_parsed_clienthello": "background",
+    "clienthello_uses_reality_server_name": "unauth",
+    "known_client_connections_without_clienthello": "interference",
+    "same_source_repeats_unexpected_sni_across_windows": "persistent",
+    "third_party_traffic_relayed_to_reality_target": "relay",
 }
 
 
@@ -157,6 +164,15 @@ def connection_lines(event):
             lines.append(i18n.t(
                 "security.campaign.window", connections=event["window_connections"],
                 sources=event.get("window_sources", 0)))
+    if kind == "client_connection_interference":
+        lines.append(i18n.t("security.interference.hint"))
+    if event.get("windows_observed"):
+        lines.append(i18n.t(
+            "security.persistent.windows", windows=event["windows_observed"],
+            hours=max(0.1, round(duration(event) / 3600, 1))))
+    up, down = event.get("relayed_client_bytes", 0), event.get("relayed_server_bytes", 0)
+    if up or down:
+        lines.append(i18n.t("security.relay", up=report.fmt_bytes(up), down=report.fmt_bytes(down)))
     outcomes = ranked(event.get("connection_outcomes"), 3)
     if outcomes:
         items = [
@@ -173,11 +189,13 @@ def connection_lines(event):
             count=fingerprints[0][1], ttls=ttls or "-"))
     names = [item for item in event.get("sni_observations") or [] if isinstance(item, dict)]
     if names:
-        items = [
-            i18n.t("security.sni.item", name=report.h(str(item.get("sni", ""))[:80]),
-                   hellos=item.get("hellos", 0), sources=item.get("sources", 0))
-            for item in names[:5]
-        ]
+        items = []
+        for item in names[:5]:
+            relayed = item.get("client_bytes", 0) + item.get("server_bytes", 0)
+            items.append(i18n.t(
+                "security.sni.item_bytes" if relayed else "security.sni.item",
+                name=report.h(str(item.get("sni", ""))[:80]), hellos=item.get("hellos", 0),
+                sources=item.get("sources", 0), bytes=report.fmt_bytes(relayed)))
         lines.append("SNI: " + " · ".join(items))
         omitted = len(names) - 5 + event.get("sni_names_omitted", 0)
         if omitted > 0:
@@ -451,6 +469,15 @@ def diagnostics(rows):
                 campaigns=stats.get("DistributedSYNCampaigns", 0),
                 active=stats.get("ActiveDistributedSYNCampaigns", 0),
                 sni=stats.get("UnexpectedSNIHellos", 0),
+            ))
+        clients = status.get("client_attribution")
+        if clients:
+            lines.append(i18n.t(
+                "security.sensor.clients",
+                state=i18n.t("security.sensor.clients_" + ("available" if clients.get("available") else "unavailable")),
+                known=clients.get("known_clients", 0), unauth=stats.get("UnauthenticatedRealityHellos", 0),
+                suppressed=stats.get("KnownClientSignalsSuppressed", 0),
+                persistent=stats.get("PersistentSNISources", 0),
             ))
         if "monitored_server_names" in status:
             names = status["monitored_server_names"]

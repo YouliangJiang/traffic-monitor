@@ -325,5 +325,19 @@
   "security.sni.item": "{name} ×{hellos} (sources: {sources})",
   "security.sni.omitted": "{count} more names not listed",
   "security.sensor.observer": "Since start: mid-stream packets ignored {midstream} · empty connections closed {empty} (evicted {evicted}) · distributed empty-connection campaigns {campaigns} ({active} active) · unexpected-SNI handshakes {sni}",
-  "security.campaign.escalated": "Sustained for about {minutes} min from {sources} sources; escalated to high once for this campaign."
+  "security.campaign.escalated": "Sustained for about {minutes} min from {sources} sources; escalated to high once for this campaign.",
+  "security.behavior.unauth": "Unauthenticated source used the REALITY name",
+  "security.behavior.interference": "A known client's handshakes never reached the server",
+  "security.behavior.persistent": "One source keeps sending unexpected SNI",
+  "security.evidence.unauth": "The handshake used this host's REALITY name, but Xray never authenticated the source",
+  "security.evidence.interference": "A recently authenticated client opened TCP connections whose ClientHello never arrived",
+  "security.evidence.persistent": "The same source appeared across many summary windows",
+  "security.evidence.relay": "Third-party traffic was relayed through this host to the REALITY target",
+  "security.relay": "Relayed through this host: up {up} · down {down}",
+  "security.sni.item_bytes": "{name} ×{hellos} (sources: {sources}, relayed {bytes})",
+  "security.persistent.windows": "Seen in {windows} summary windows over about {hours} h",
+  "security.interference.hint": "This source is one of your recently authenticated clients: likely path interference or a client network fault, not a probe.",
+  "security.sensor.clients": "Known-client attribution: {state} · known clients {known} · unauthenticated REALITY handshakes {unauth} · own signals ignored {suppressed} · persistent sources tracked {persistent}",
+  "security.sensor.clients_available": "ok",
+  "security.sensor.clients_unavailable": "access log unreadable"
 }
